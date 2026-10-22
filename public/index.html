@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Traffic Depot – Customer Map</title>
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+<style>
+  :root { --green:#16a34a; --yellow:#eab308; --red:#dc2626; --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; font: 14px/1.4 system-ui, sans-serif; color: var(--ink); }
+  #app { display: flex; height: 100%; }
+  #side { width: 320px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--line); background: #fff; }
+  #map { flex: 1; }
+  .head { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .head h1 { font-size: 17px; margin: 0 0 2px; }
+  .head small { color: var(--muted); }
+  .head form { display: inline; }
+  .head button.link { background: none; border: 0; color: #1d4ed8; cursor: pointer; padding: 0; font: inherit; }
+  .legend { padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  .legend label { display: flex; align-items: center; gap: 8px; padding: 5px 0; cursor: pointer; }
+  .legend .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+  .legend .count { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .legend .desc { color: var(--muted); font-size: 12px; }
+  .unmapped { flex: 1; overflow: auto; padding: 10px 16px; }
+  .unmapped h2 { font-size: 13px; margin: 0 0 6px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .unmapped ul { list-style: none; padding: 0; margin: 0; }
+  .unmapped li { padding: 7px 0; border-bottom: 1px solid var(--line); }
+  .unmapped li .n { font-weight: 600; }
+  .unmapped li .why { color: var(--muted); font-size: 12px; }
+  .unmapped li .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  .unmapped li a { font-size: 12px; }
+  #msg { padding: 10px 16px; color: #b91c1c; display: none; }
+  .pop b { font-size: 15px; } .pop table { margin-top: 4px; border-collapse: collapse; }
+  .pop td { padding: 1px 8px 1px 0; vertical-align: top; } .pop td:first-child { color: var(--muted); white-space: nowrap; }
+  .pop .flag { margin-top: 6px; font-size: 12px; color: #92400e; background: #fef3c7; padding: 2px 6px; border-radius: 4px; display: inline-block; }
+  @media (max-width: 700px) { #app { flex-direction: column-reverse; } #side { width: 100%; height: 42%; border-right: 0; border-top: 1px solid var(--line); } }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="side">
+    <div class="head">
+      <h1>Traffic Depot Customers</h1>
+      <small id="synced">Loading…</small> ·
+      <form method="post" action="/logout"><button class="link" type="submit">Sign out</button></form>
+    </div>
+    <div id="msg"></div>
+    <div class="legend" id="legend"></div>
+    <div class="unmapped">
+      <h2>Unmapped contacts (<span id="uCount">0</span>)</h2>
+      <ul id="uList"></ul>
+    </div>
+  </aside>
+  <div id="map"></div>
+</div>
+
+<script src="/vendor/leaflet/leaflet.js"></script>
+<script>
+(function () {
+  var COLORS = { green: '#16a34a', yellow: '#eab308', red: '#dc2626' };
+  var visible = { green: true, yellow: true, red: true };
+  var markers = []; // {status, layer}
+
+  var map = L.map('map', { preferCanvas: true }).setView([32.75, -83.4], 7); // centre of Georgia
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 18, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  }).addTo(map);
+
+  function el(tag, attrs, children) {
+    var e = document.createElement(tag);
+    Object.keys(attrs || {}).forEach(function (k) {
+      if (k === 'text') e.textContent = attrs[k]; else e.setAttribute(k, attrs[k]);
+    });
+    (children || []).forEach(function (c) { e.appendChild(c); });
+    return e;
+  }
+  function fmt(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  }
+  function linkTo(c) {
+    return c.hubspotUrl ? el('a', { href: c.hubspotUrl, target: '_blank', rel: 'noopener', text: 'Open in HubSpot' }) : null;
+  }
+  function popup(c) {
+    var root = el('div', { 'class': 'pop' });
+    root.appendChild(el('b', { text: c.name }));
+    var rows = [['Company', c.company || '—'], ['City', c.city || '—'], ['Last purchase', fmt(c.lastPurchase)], ['Last contact', fmt(c.lastContacted)]];
+    var tbody = el('tbody');
+    rows.forEach(function (r) { tbody.appendChild(el('tr', {}, [el('td', { text: r[0] }), el('td', { text: r[1] })])); });
+    root.appendChild(el('table', {}, [tbody]));
+    if (c.locationSource === 'company') root.appendChild(el('div', { 'class': 'flag', text: 'Location from company address' }));
+    var a = linkTo(c);
+    if (a) { var p = el('div'); p.style.marginTop = '6px'; p.appendChild(a); root.appendChild(p); }
+    return root;
+  }
+
+  // Contacts that share a geocoded point (same city/company) are fanned out slightly so each stays clickable.
+  function jitter(list) {
+    var seen = {};
+    return list.map(function (c) {
+      var key = c.lat.toFixed(5) + ',' + c.lng.toFixed(5), n = seen[key] = (seen[key] || 0) + 1;
+      if (n === 1) return [c.lat, c.lng];
+      var ang = n * 2.399963, rad = 0.0004 * Math.sqrt(n - 1); // golden-angle spiral, ~40 m steps
+      return [c.lat + rad * Math.sin(ang), c.lng + rad * Math.cos(ang) / Math.cos(c.lat * Math.PI / 180)];
+    });
+  }
+
+  function renderLegend(data) {
+    var box = document.getElementById('legend');
+    box.textContent = '';
+    var d = data.recentDays;
+    var defs = [
+      ['green', 'Purchased in the last ' + d + ' days'],
+      ['yellow', 'Contacted in the last ' + d + ' days, no recent purchase'],
+      ['red', 'No recent purchase or contact']
+    ];
+    defs.forEach(function (def) {
+      var cb = el('input', { type: 'checkbox' });
+      cb.checked = visible[def[0]];
+      cb.addEventListener('change', function () { visible[def[0]] = cb.checked; applyFilter(); });
+      var dot = el('span', { 'class': 'dot' }); dot.style.background = COLORS[def[0]];
+      var txt = el('span', {}, [el('span', { text: def[0][0].toUpperCase() + def[0].slice(1) }), el('div', { 'class': 'desc', text: def[1] })]);
+      box.appendChild(el('label', {}, [cb, dot, txt, el('span', { 'class': 'count', text: String(data.counts[def[0]]) })]));
+    });
+  }
+
+  function applyFilter() {
+    markers.forEach(function (m) {
+      var on = visible[m.status], has = map.hasLayer(m.layer);
+      if (on && !has) m.layer.addTo(map); else if (!on && has) map.removeLayer(m.layer);
+    });
+    document.querySelectorAll('#uList li').forEach(function (li) {
+      li.style.display = visible[li.dataset.status] ? '' : 'none';
+    });
+  }
+
+  function renderUnmapped(list) {
+    document.getElementById('uCount').textContent = list.length;
+    var ul = document.getElementById('uList');
+    ul.textContent = '';
+    list.forEach(function (c) {
+      var dot = el('span', { 'class': 'dot' }); dot.style.background = COLORS[c.status];
+      var li = el('li', {}, [
+        el('div', { 'class': 'n' }, [dot, document.createTextNode(c.name)]),
+        el('div', { text: c.company || '—' }),
+        el('div', { 'class': 'why', text: c.reason || 'No location' })
+      ]);
+      li.dataset.status = c.status;
+      var a = linkTo(c); if (a) li.appendChild(a);
+      ul.appendChild(li);
+    });
+  }
+
+  function showError(text) {
+    var m = document.getElementById('msg'); m.textContent = text; m.style.display = text ? 'block' : 'none';
+  }
+
+  fetch('/api/contacts', { credentials: 'same-origin' }).then(function (r) {
+    if (r.status === 401) { location.href = '/login'; throw new Error('unauthorized'); }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (data) {
+    renderLegend(data);
+    renderUnmapped(data.unmapped);
+    var pts = jitter(data.mapped);
+    var bounds = [];
+    data.mapped.forEach(function (c, i) {
+      var layer = L.circleMarker(pts[i], { radius: 7, color: '#fff', weight: 1.5, fillColor: COLORS[c.status], fillOpacity: 0.9 })
+        .bindPopup(function () { return popup(c); }).addTo(map);
+      markers.push({ status: c.status, layer: layer });
+      bounds.push(pts[i]);
+    });
+    if (bounds.length) map.fitBounds(bounds, { padding: [30, 30], maxZoom: 10 });
+    document.getElementById('synced').textContent = data.lastSync ? 'Last sync: ' + new Date(data.lastSync).toLocaleString() : 'No sync yet';
+    if (data.lastSyncFailed) showError('The most recent sync failed; data may be stale. Check the sync logs.');
+    else if (!data.mapped.length && !data.unmapped.length) showError('No contacts yet. Run "npm run sync" (or "npm run seed-demo").');
+  }).catch(function (err) {
+    if (err.message !== 'unauthorized') showError('Could not load contacts: ' + err.message);
+  });
+})();
+</script>
+</body>
+</html>
