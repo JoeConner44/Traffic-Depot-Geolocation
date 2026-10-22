@@ -49,7 +49,7 @@ function createApp({ db, cfg = config }) {
   if (cfg.trustProxy !== '0' && cfg.trustProxy !== '') app.set('trust proxy', /^\d+$/.test(cfg.trustProxy) ? Number(cfg.trustProxy) : cfg.trustProxy);
   app.use(express.urlencoded({ extended: false, limit: '4kb' }));
   app.use((req, res, next) => {
-    res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY' });
+    res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'X-Frame-Options': 'DENY' });
     next();
   });
 
