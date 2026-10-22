@@ -4,7 +4,9 @@
   "description": "HubSpot contacts as color-coded dots on a map of Georgia",
   "private": true,
   "main": "src/server.js",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node src/server.js",
     "sync": "node src/sync.js",
@@ -16,5 +18,8 @@
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
     "leaflet": "1.9.4"
+  },
+  "allowScripts": {
+    "better-sqlite3@11.10.0": true
   }
 }
