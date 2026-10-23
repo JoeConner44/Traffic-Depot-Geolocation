@@ -6,7 +6,7 @@ const { createHubSpotClient, shapeContact } = require('./hubspot');
 const { createPurchaseProvider } = require('./providers');
 const { createGeocoder } = require('./geocode');
 const { latestDate } = require('./status');
-const { passesStateFilter, normalizeAddress, resolveLocation, inGeorgia } = require('./location');
+const { passesStateFilter, normalizeAddress, resolveLocation } = require('./location');
 const { normalizeState } = require('./states');
 
 const LOCK_STALE_MS = 2 * 3600 * 1000;
@@ -24,11 +24,10 @@ function acquireLock(file) {
   return () => { try { fs.unlinkSync(file); } catch { /* already gone */ } };
 }
 
-// A contact whose state is GA (or blank while only Georgia is allowed) must land inside Georgia.
-// Catches bad ZIPs/cities, e.g. a Georgia address with a Florida ZIP that Google places in Florida.
-function expectsGeorgia(state, config) {
-  const st = normalizeState(state);
-  return st === 'GA' || (st === '' && !config.allowNonGA);
+// The state a contact's location should be in: its own state, or Georgia when the state is blank and only
+// Georgia is allowed. '' means "any" (blank state with ALLOW_NON_GA).
+function expectedState(state, config) {
+  return normalizeState(state) || (config.allowNonGA ? '' : 'GA');
 }
 
 async function runSync({ db, config, hubspot, provider, geocoder, log = console.log }) {
@@ -64,9 +63,10 @@ async function runSync({ db, config, hubspot, provider, geocoder, log = console.
     let reason = null;
     if (!key) reason = 'No address, city or ZIP on the contact or its company';
     else {
-      coords = await geocoder.geocode(key);
+      const want = expectedState(loc.state, config);
+      coords = await geocoder.geocode(key, want);
       if (!coords) reason = `Address could not be geocoded (${key})`;
-      else if (expectsGeorgia(loc.state, config) && !inGeorgia(coords.lat, coords.lng)) { coords = null; reason = `Address says Georgia but geocoded outside it (${key})`; }
+      else if (want && coords.state && coords.state !== want) { reason = `Address says ${want} but geocoded to ${coords.state} (${key})`; coords = null; }
     }
     coords ? mapped++ : unmapped++;
     if (loc.source === 'company') fromCompany++;
@@ -75,7 +75,7 @@ async function runSync({ db, config, hubspot, provider, geocoder, log = console.
       id: c.id,
       firstname: c.firstname, lastname: c.lastname, email: c.email,
       company: c.company || loc.companyName || '',
-      address: loc.address, city: loc.city, state: loc.state, zip: loc.zip,
+      address: loc.address, city: loc.city, state: loc.state || (coords && coords.state) || '', zip: loc.zip,
       location_source: loc.source,
       last_contacted: latestDate(c.notesLastContacted, c.lastSalesActivity, config.includeEmailSendDate ? c.emailLastSend : null),
       last_purchase: purchases.get(c.id) || null,
@@ -140,4 +140,4 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { runSync, expectsGeorgia };
+module.exports = { runSync, expectedState };

@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS geocode_cache (
   lng          REAL,
   status       TEXT NOT NULL,                 -- 'ok' | 'not_found'
   formatted    TEXT,
+  geo_state    TEXT,                          -- state Google says the point is in (NULL = saved before this was recorded)
   created_at   TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sync_runs (
@@ -45,6 +46,10 @@ function openDb(file = config.dbPath) {
   db.pragma('journal_mode = WAL');
   db.pragma('busy_timeout = 5000');
   db.exec(SCHEMA);
+  // Databases created before geo_state existed.
+  if (!db.prepare('PRAGMA table_info(geocode_cache)').all().some((c) => c.name === 'geo_state')) {
+    db.exec('ALTER TABLE geocode_cache ADD COLUMN geo_state TEXT');
+  }
   return db;
 }
 

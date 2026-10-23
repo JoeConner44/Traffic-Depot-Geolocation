@@ -27,10 +27,21 @@ function fakeGoogle() {
   const calls = [];
   const fetchImpl = async (url) => {
     calls.push(url);
-    const addr = new URL(url).searchParams.get('address');
-    const json = addr.includes('zzz')
-      ? { status: 'ZERO_RESULTS', results: [] }
-      : { status: 'OK', results: [{ formatted_address: addr, geometry: { location: addr.includes('rome') ? { lat: 34.25, lng: -85.16 } : addr.includes('miami') ? { lat: 25.76, lng: -80.19 } : { lat: 33.75, lng: -84.39 } } }] };
+    const q = new URL(url).searchParams;
+    const addr = q.get('address');
+    const restricted = /administrative_area:GA/.test(q.get('components') || '');
+    let json;
+    if (addr.includes('zzz')) json = { status: 'ZERO_RESULTS', results: [] };
+    else {
+      // "auburn" resolves to Alabama unless Google is told to stay in GA; "miami" is always Florida.
+      const inAL = addr.includes('auburn') && !restricted;
+      const loc = addr.includes('miami') ? { lat: 25.76, lng: -80.19, st: 'FL' }
+        : inAL ? { lat: 32.6, lng: -85.48, st: 'AL' }
+        : addr.includes('rome') ? { lat: 34.25, lng: -85.16, st: 'GA' }
+        : { lat: 33.75, lng: -84.39, st: 'GA' };
+      json = { status: 'OK', results: [{ formatted_address: addr, geometry: { location: { lat: loc.lat, lng: loc.lng } },
+        address_components: [{ short_name: loc.st, types: ['administrative_area_level_1', 'political'] }] }] };
+    }
     return { status: 200, ok: true, headers: { get: () => null }, json: async () => json };
   };
   return { fetchImpl, calls };
@@ -74,7 +85,7 @@ test('sync is idempotent and geocodes each address only once', async () => {
   assert.equal(db.prepare('SELECT COUNT(*) n FROM contacts').get().n, 4);
 });
 
-test('with ALLOW_NON_GA, a GA-labelled contact that geocodes outside Georgia is unmapped; a FL contact stays mapped', async () => {
+test('with ALLOW_NON_GA, a GA-labelled contact that geocodes to another state is unmapped; a FL contact stays mapped', async () => {
   const db = openDb(':memory:');
   const extra = [
     contact('6', { firstname: 'Fay', lastname: 'F', address: '1 Bay St', city: 'Miami', state: 'GA', zip: '33101' }),
@@ -83,6 +94,28 @@ test('with ALLOW_NON_GA, a GA-labelled contact that geocodes outside Georgia is 
   await run(db, fakeGoogle(), { config: { ...cfg, allowNonGA: true }, extra });
   const row = (id) => db.prepare('SELECT * FROM contacts WHERE id=?').get(id);
   assert.equal(row('6').lat, null);
-  assert.match(row('6').unmapped_reason, /says Georgia but geocoded outside/);
+  assert.match(row('6').unmapped_reason, /says GA but geocoded to FL/);
   assert.equal(row('7').lat, 25.76);
+});
+
+test('Georgia contacts are geocoded with a GA restriction, so Auburn, GA does not land in Auburn, AL', async () => {
+  const db = openDb(':memory:');
+  const google = fakeGoogle();
+  const extra = [contact('8', { firstname: 'Hal', lastname: 'H', city: 'Auburn', state: 'GA' })];
+  await run(db, google, { extra });
+  assert.ok(google.calls.some((u) => /auburn/.test(u) && /administrative_area%3AGA|administrative_area:GA/.test(decodeURIComponent(u))));
+  const r = db.prepare('SELECT * FROM contacts WHERE id=?').get('8');
+  assert.equal(r.lat, 33.75); // Georgia, not Alabama's 32.6
+});
+
+test('legacy cache rows (no geo_state) are looked up again once, then served from cache', async () => {
+  const db = openDb(':memory:');
+  db.prepare("INSERT INTO geocode_cache (address_key, lat, lng, status, created_at) VALUES ('auburn, ga', 32.6, -85.48, 'ok', ?)").run(new Date().toISOString());
+  const google = fakeGoogle();
+  const extra = [contact('8', { firstname: 'Hal', lastname: 'H', city: 'Auburn', state: 'GA' })];
+  await run(db, google, { extra });
+  assert.equal(db.prepare('SELECT lat FROM contacts WHERE id=?').get('8').lat, 33.75);
+  const before = google.calls.length;
+  await run(db, google, { extra });
+  assert.equal(google.calls.length, before);
 });

@@ -90,7 +90,10 @@ It is rate-limited to about 2 requests/second, so large lists take a while.
 Results are cached in `geocode_cache`, keyed by the normalized address (`123 main st, atlanta, ga 30303`), so each address
 is geocoded once, across runs and across contacts that share an address. Addresses Google can't find are cached too and
 retried after 30 days. Contacts whose state is set and not GA are skipped (count logged) unless `ALLOW_NON_GA=true`;
-blank state is treated as GA. A result outside Georgia's bounding box is sent to the unmapped panel.
+blank state is treated as GA. Each lookup tells Google to search only the contact's own state (so "Auburn, GA" can't
+come back as Auburn, AL), and the state Google returns is saved with the cached result. If it doesn't match the contact's
+state, the contact goes to the unmapped panel with the reason. Cache rows saved before this check existed are looked up
+once more, then cached again.
 
 ## Running the sync
 
