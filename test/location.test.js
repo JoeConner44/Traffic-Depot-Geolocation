@@ -31,3 +31,11 @@ test('inGeorgia bounding box', () => {
   assert.equal(inGeorgia(33.749, -84.388), true);
   assert.equal(inGeorgia(25.76, -80.19), false); // Miami
 });
+
+test('normalizeState maps names and abbreviations to codes', () => {
+  const { normalizeState } = require('../src/states');
+  for (const v of ['GA', 'ga', 'Georgia', ' georgia ', 'G.A.']) assert.equal(normalizeState(v), 'GA', v);
+  assert.equal(normalizeState('north carolina'), 'NC');
+  assert.equal(normalizeState('Florida'), 'FL');
+  for (const v of ['', null, undefined, 'Ontario', 'XX']) assert.equal(normalizeState(v), '', String(v));
+});

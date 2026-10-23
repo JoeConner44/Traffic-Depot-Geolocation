@@ -4,6 +4,8 @@ const express = require('express');
 const config = require('./config');
 const { openDb } = require('./db');
 const { computeStatus } = require('./status');
+const { normalizeState, STATES } = require('./states');
+const { inGeorgia } = require('./location');
 
 const COOKIE = 'td_session';
 const SESSION_MS = 12 * 3600 * 1000;
@@ -102,11 +104,16 @@ function createApp({ db, cfg = config }) {
     for (const r of selectAll.all()) {
       const status = computeStatus({ lastPurchase: r.last_purchase, lastContacted: r.last_contacted }, { now, recentDays: cfg.recentDays });
       const demo = r.id.startsWith('demo-');
+      const mappedPoint = r.lat != null && r.lng != null;
+      // Blank state on a mapped contact: it was only accepted because it geocoded inside Georgia.
+      let state = normalizeState(r.state);
+      if (!state && mappedPoint && inGeorgia(r.lat, r.lng)) state = 'GA';
       const c = {
         id: r.id,
         name: [r.firstname, r.lastname].filter(Boolean).join(' ') || r.email || '(no name)',
         company: r.company || '',
         city: r.city || '',
+        state,
         lastPurchase: r.last_purchase,
         lastContacted: r.last_contacted,
         locationSource: r.location_source,
@@ -122,6 +129,7 @@ function createApp({ db, cfg = config }) {
       }
     }
     const run = lastRun.get(), ok = lastOk.get();
+    out.stateNames = STATES;
     out.recentDays = cfg.recentDays;
     out.lastSync = ok ? ok.finished_at : null;
     out.lastSyncFailed = !!(run && !run.ok);

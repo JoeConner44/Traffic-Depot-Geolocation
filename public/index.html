@@ -22,6 +22,9 @@
   .legend .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; }
   .legend .count { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 600; }
   .legend .desc { color: var(--muted); font-size: 12px; }
+  .statebox { padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  .statebox label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .04em; }
+  .statebox select { width: 100%; padding: 7px 8px; font: inherit; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
   .unmapped { flex: 1; overflow: auto; padding: 10px 16px; }
   .unmapped h2 { font-size: 13px; margin: 0 0 6px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
   .unmapped ul { list-style: none; padding: 0; margin: 0; }
@@ -46,6 +49,7 @@
       <form method="post" action="/logout"><button class="link" type="submit">Sign out</button></form>
     </div>
     <div id="msg"></div>
+    <div class="statebox"><label for="stateSel">State</label><select id="stateSel"></select></div>
     <div class="legend" id="legend"></div>
     <div class="unmapped">
       <h2>Unmapped contacts (<span id="uCount">0</span>)</h2>
@@ -60,7 +64,11 @@
 (function () {
   var COLORS = { green: '#16a34a', yellow: '#eab308', red: '#dc2626' };
   var visible = { green: true, yellow: true, red: true };
-  var markers = []; // {status, layer}
+  var markers = [];      // { c, layer }
+  var unmappedLis = [];  // { c, li }
+  var countEls = {};
+  var selected = 'ALL';
+  var stateNames = {};
 
   var map = L.map('map', { preferCanvas: true }).setView([32.75, -83.4], 7); // centre of Georgia
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -85,7 +93,7 @@
   function popup(c) {
     var root = el('div', { 'class': 'pop' });
     root.appendChild(el('b', { text: c.name }));
-    var rows = [['Company', c.company || '—'], ['City', c.city || '—'], ['Last purchase', fmt(c.lastPurchase)], ['Last contact', fmt(c.lastContacted)]];
+    var rows = [['Company', c.company || '—'], ['City', c.city ? c.city + (c.state ? ', ' + c.state : '') : '—'], ['Last purchase', fmt(c.lastPurchase)], ['Last contact', fmt(c.lastContacted)]];
     var tbody = el('tbody');
     rows.forEach(function (r) { tbody.appendChild(el('tr', {}, [el('td', { text: r[0] }), el('td', { text: r[1] })])); });
     root.appendChild(el('table', {}, [tbody]));
@@ -106,6 +114,57 @@
     });
   }
 
+  // --- filtering ---
+  function stateKey(c) { return c.state || '?'; }
+  function inState(c) { return selected === 'ALL' || stateKey(c) === selected; }
+  // Unmapped contacts with no known state stay visible under any state filter, so none are hidden silently.
+  function unmappedInState(c) { return selected === 'ALL' || !c.state || c.state === selected; }
+
+  function refresh(refit) {
+    var counts = { green: 0, yellow: 0, red: 0 };
+    var pts = [];
+    markers.forEach(function (m) {
+      var stateOk = inState(m.c);
+      if (stateOk) { counts[m.c.status]++; pts.push(m.layer.getLatLng()); }
+      var on = stateOk && visible[m.c.status], has = map.hasLayer(m.layer);
+      if (on && !has) m.layer.addTo(map); else if (!on && has) map.removeLayer(m.layer);
+    });
+    Object.keys(countEls).forEach(function (k) { countEls[k].textContent = counts[k].toLocaleString(); });
+    var shown = 0;
+    unmappedLis.forEach(function (u) {
+      var on = unmappedInState(u.c) && visible[u.c.status];
+      u.li.style.display = on ? '' : 'none';
+      if (on) shown++;
+    });
+    document.getElementById('uCount').textContent = shown;
+    if (refit && pts.length) map.fitBounds(pts, { padding: [30, 30], maxZoom: selected === 'ALL' ? 10 : 9 });
+  }
+
+  function buildStateSelect(data) {
+    var byState = {}, total = data.mapped.length;
+    data.mapped.forEach(function (c) { byState[stateKey(c)] = (byState[stateKey(c)] || 0) + 1; });
+    var sel = document.getElementById('stateSel');
+    var codes = Object.keys(byState).filter(function (k) { return k !== '?'; }).sort(function (a, b) {
+      if (a === 'GA') return -1; if (b === 'GA') return 1;
+      return (stateNames[a] || a).localeCompare(stateNames[b] || b);
+    });
+    function opt(value, label) { var o = el('option', { value: value, text: label }); sel.appendChild(o); }
+    opt('ALL', 'All states (' + total.toLocaleString() + ')');
+    codes.forEach(function (k) { opt(k, (stateNames[k] || k) + ' (' + byState[k].toLocaleString() + ')'); });
+    if (byState['?']) opt('?', 'Unknown state (' + byState['?'].toLocaleString() + ')');
+
+    var saved = null;
+    try { saved = localStorage.getItem('td_state'); } catch (e) { /* storage unavailable */ }
+    var valid = function (v) { return v && Array.prototype.some.call(sel.options, function (o) { return o.value === v; }); };
+    selected = valid(saved) ? saved : (byState.GA ? 'GA' : 'ALL'); // default to Georgia when there is any
+    sel.value = selected;
+    sel.addEventListener('change', function () {
+      selected = sel.value;
+      try { localStorage.setItem('td_state', selected); } catch (e) { /* ignore */ }
+      refresh(true);
+    });
+  }
+
   function renderLegend(data) {
     var box = document.getElementById('legend');
     box.textContent = '';
@@ -118,25 +177,16 @@
     defs.forEach(function (def) {
       var cb = el('input', { type: 'checkbox' });
       cb.checked = visible[def[0]];
-      cb.addEventListener('change', function () { visible[def[0]] = cb.checked; applyFilter(); });
+      cb.addEventListener('change', function () { visible[def[0]] = cb.checked; refresh(false); });
       var dot = el('span', { 'class': 'dot' }); dot.style.background = COLORS[def[0]];
       var txt = el('span', {}, [el('span', { text: def[0][0].toUpperCase() + def[0].slice(1) }), el('div', { 'class': 'desc', text: def[1] })]);
-      box.appendChild(el('label', {}, [cb, dot, txt, el('span', { 'class': 'count', text: String(data.counts[def[0]]) })]));
-    });
-  }
-
-  function applyFilter() {
-    markers.forEach(function (m) {
-      var on = visible[m.status], has = map.hasLayer(m.layer);
-      if (on && !has) m.layer.addTo(map); else if (!on && has) map.removeLayer(m.layer);
-    });
-    document.querySelectorAll('#uList li').forEach(function (li) {
-      li.style.display = visible[li.dataset.status] ? '' : 'none';
+      var count = el('span', { 'class': 'count', text: '0' });
+      countEls[def[0]] = count;
+      box.appendChild(el('label', {}, [cb, dot, txt, count]));
     });
   }
 
   function renderUnmapped(list) {
-    document.getElementById('uCount').textContent = list.length;
     var ul = document.getElementById('uList');
     ul.textContent = '';
     list.forEach(function (c) {
@@ -146,9 +196,9 @@
         el('div', { text: c.company || '—' }),
         el('div', { 'class': 'why', text: c.reason || 'No location' })
       ]);
-      li.dataset.status = c.status;
       var a = linkTo(c); if (a) li.appendChild(a);
       ul.appendChild(li);
+      unmappedLis.push({ c: c, li: li });
     });
   }
 
@@ -161,17 +211,17 @@
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
   }).then(function (data) {
-    renderLegend(data);
-    renderUnmapped(data.unmapped);
+    stateNames = data.stateNames || {};
     var pts = jitter(data.mapped);
-    var bounds = [];
     data.mapped.forEach(function (c, i) {
       var layer = L.circleMarker(pts[i], { radius: 7, color: '#fff', weight: 1.5, fillColor: COLORS[c.status], fillOpacity: 0.9 })
-        .bindPopup(function () { return popup(c); }).addTo(map);
-      markers.push({ status: c.status, layer: layer });
-      bounds.push(pts[i]);
+        .bindPopup(function () { return popup(c); });
+      markers.push({ c: c, layer: layer });
     });
-    if (bounds.length) map.fitBounds(bounds, { padding: [30, 30], maxZoom: 10 });
+    renderLegend(data);
+    renderUnmapped(data.unmapped);
+    buildStateSelect(data);
+    refresh(true);
     document.getElementById('synced').textContent = data.lastSync ? 'Last sync: ' + new Date(data.lastSync).toLocaleString() : 'No sync yet';
     if (data.lastSyncFailed) showError('The most recent sync failed; data may be stale. Check the sync logs.');
     else if (!data.mapped.length && !data.unmapped.length) showError('No contacts yet. Run "npm run sync" (or "npm run seed-demo").');
