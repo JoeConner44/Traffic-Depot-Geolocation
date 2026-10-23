@@ -142,7 +142,7 @@ function createApp({ db, cfg = config }) {
 if (require.main === module) {
   const db = openDb();
   const app = createApp({ db });
-  app.listen(config.port, () => console.log(`Traffic Depot map listening on :${config.port}`));
+  app.listen(config.port, config.host, () => console.log(`Traffic Depot map listening on ${config.host}:${config.port}`));
 }
 
 module.exports = { createApp, makeSession, validSession };

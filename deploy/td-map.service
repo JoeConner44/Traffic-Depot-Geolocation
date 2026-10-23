@@ -1,0 +1,20 @@
+[Unit]
+Description=Traffic Depot customer map
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=tdmap
+WorkingDirectory=/opt/traffic-depot
+EnvironmentFile=/opt/traffic-depot/.env
+ExecStart=/usr/bin/node src/server.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/traffic-depot
+
+[Install]
+WantedBy=multi-user.target

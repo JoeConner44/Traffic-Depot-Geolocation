@@ -115,11 +115,15 @@ Cron, daily at 5:15am (adjust paths):
 15 5 * * * cd /opt/traffic-depot && /usr/bin/node src/sync.js >> /var/log/td-sync.log 2>&1
 ```
 
-On Render use a **Cron Job** service (`npm run sync`) with the same disk and env vars. On Fly.io or Railway use their
-scheduled-job feature, or run the cron entry above inside the VM. `npm run sync` only needs access to the same `DB_PATH`
-as the web server.
+`npm run sync` must run on the same machine/disk as the web server (it writes the same SQLite file). On a VM use cron
+(see the deploy guide); on platforms where a disk attaches to one service only (Render, Fly, Railway), run it from inside
+that service's own shell or scheduler.
 
 ## Deploying
+
+**Google Cloud free-tier VM (step-by-step): see [docs/DEPLOY-GCP.md](docs/DEPLOY-GCP.md)** (setup script and config are in `deploy/`).
+The generic notes below apply to other hosts. On Render a disk can only attach to a single service, so run the sync as a
+scheduled command on that same service rather than as a separate Cron Job.
 
 Any host that runs Node and has a **persistent disk** for the SQLite file works (a small VPS, Render, Fly.io with a volume, Railway
 with a volume). The SQLite file must be on that disk, because the sync and the web server both use it.

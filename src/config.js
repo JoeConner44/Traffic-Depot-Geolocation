@@ -22,6 +22,7 @@ const config = {
   appPassword: process.env.APP_PASSWORD || '',
   sessionSecret: process.env.SESSION_SECRET || '',
   port: int(process.env.PORT, 3000),
+  host: process.env.HOST || '0.0.0.0', // use 127.0.0.1 when a reverse proxy (Caddy/nginx) fronts the app
   trustProxy: process.env.TRUST_PROXY || '0',
   production: process.env.NODE_ENV === 'production',
   dbPath: path.resolve(process.env.DB_PATH || './data/traffic-depot.db'),
