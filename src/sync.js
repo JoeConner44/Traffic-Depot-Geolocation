@@ -7,6 +7,7 @@ const { createPurchaseProvider } = require('./providers');
 const { createGeocoder } = require('./geocode');
 const { latestDate } = require('./status');
 const { passesStateFilter, normalizeAddress, resolveLocation, inGeorgia } = require('./location');
+const { normalizeState } = require('./states');
 
 const LOCK_STALE_MS = 2 * 3600 * 1000;
 
@@ -21,6 +22,13 @@ function acquireLock(file) {
     fs.writeFileSync(file, String(process.pid)); // stale lock from a crashed run
   }
   return () => { try { fs.unlinkSync(file); } catch { /* already gone */ } };
+}
+
+// A contact whose state is GA (or blank while only Georgia is allowed) must land inside Georgia.
+// Catches bad ZIPs/cities, e.g. a Georgia address with a Florida ZIP that Google places in Florida.
+function expectsGeorgia(state, config) {
+  const st = normalizeState(state);
+  return st === 'GA' || (st === '' && !config.allowNonGA);
 }
 
 async function runSync({ db, config, hubspot, provider, geocoder, log = console.log }) {
@@ -58,7 +66,7 @@ async function runSync({ db, config, hubspot, provider, geocoder, log = console.
     else {
       coords = await geocoder.geocode(key);
       if (!coords) reason = `Address could not be geocoded (${key})`;
-      else if (!config.allowNonGA && !inGeorgia(coords.lat, coords.lng)) { coords = null; reason = `Geocoded outside Georgia (${key})`; }
+      else if (expectsGeorgia(loc.state, config) && !inGeorgia(coords.lat, coords.lng)) { coords = null; reason = `Address says Georgia but geocoded outside it (${key})`; }
     }
     coords ? mapped++ : unmapped++;
     if (loc.source === 'company') fromCompany++;
@@ -132,4 +140,4 @@ async function main() {
 
 if (require.main === module) main();
 
-module.exports = { runSync };
+module.exports = { runSync, expectsGeorgia };

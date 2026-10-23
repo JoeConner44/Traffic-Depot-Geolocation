@@ -7,7 +7,7 @@ const { createHubspotDealsProvider } = require('../src/providers/hubspotDeals');
 
 const contact = (id, props, assoc = {}) => ({ id, properties: props, associations: assoc });
 
-function fakeHubspot() {
+function fakeHubspot(extra) {
   return {
     fetchAllContacts: async () => [
       contact('1', { firstname: 'Ann', lastname: 'A', address: '1 Main St', city: 'Atlanta', state: 'GA', zip: '30303', notes_last_contacted: '2020-01-01T00:00:00Z' }, { deals: { results: [{ id: 'd1' }] } }),
@@ -15,6 +15,7 @@ function fakeHubspot() {
       contact('3', { firstname: 'Cy', lastname: 'C', city: 'Miami', state: 'FL' }),
       contact('4', { firstname: 'Di', lastname: 'D' }),
       contact('5', { firstname: 'Ed', lastname: 'E', address: 'nowhere', city: 'Zzz', state: 'GA' }),
+      ...(extra || []),
     ],
     fetchCompanies: async () => [{ id: 'c1', properties: { name: 'Acme', address: '9 Plant Rd', city: 'Rome', state: 'GA', zip: '30161' } }],
     fetchDeals: async () => [{ id: 'd1', properties: { pipeline: 'default', dealstage: 'won', closedate: '2025-05-01T00:00:00Z' } }],
@@ -29,7 +30,7 @@ function fakeGoogle() {
     const addr = new URL(url).searchParams.get('address');
     const json = addr.includes('zzz')
       ? { status: 'ZERO_RESULTS', results: [] }
-      : { status: 'OK', results: [{ formatted_address: addr, geometry: { location: addr.includes('rome') ? { lat: 34.25, lng: -85.16 } : { lat: 33.75, lng: -84.39 } } }] };
+      : { status: 'OK', results: [{ formatted_address: addr, geometry: { location: addr.includes('rome') ? { lat: 34.25, lng: -85.16 } : addr.includes('miami') ? { lat: 25.76, lng: -80.19 } : { lat: 33.75, lng: -84.39 } } }] };
     return { status: 200, ok: true, headers: { get: () => null }, json: async () => json };
   };
   return { fetchImpl, calls };
@@ -37,10 +38,10 @@ function fakeGoogle() {
 
 const cfg = { allowNonGA: false, includeEmailSendDate: false };
 
-async function run(db, google) {
-  const hubspot = fakeHubspot();
+async function run(db, google, { config = cfg, extra } = {}) {
+  const hubspot = fakeHubspot(extra);
   const geocoder = createGeocoder({ db, apiKey: 'k', fetchImpl: google.fetchImpl, sleep: async () => {}, throttleMs: 0 });
-  return runSync({ db, config: cfg, hubspot, provider: createHubspotDealsProvider({ hubspot }), geocoder, log: () => {} });
+  return runSync({ db, config, hubspot, provider: createHubspotDealsProvider({ hubspot }), geocoder, log: () => {} });
 }
 
 test('sync maps, falls back to company address, reports unmapped, skips non-GA', async () => {
@@ -71,4 +72,17 @@ test('sync is idempotent and geocodes each address only once', async () => {
   assert.equal(google.calls.length, firstCalls); // all served from geocode_cache (incl. the not-found one)
   assert.equal(again.geocodeApiCalls, 0);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM contacts').get().n, 4);
+});
+
+test('with ALLOW_NON_GA, a GA-labelled contact that geocodes outside Georgia is unmapped; a FL contact stays mapped', async () => {
+  const db = openDb(':memory:');
+  const extra = [
+    contact('6', { firstname: 'Fay', lastname: 'F', address: '1 Bay St', city: 'Miami', state: 'GA', zip: '33101' }),
+    contact('7', { firstname: 'Gus', lastname: 'G', address: '2 Bay St', city: 'Miami', state: 'FL', zip: '33101' }),
+  ];
+  await run(db, fakeGoogle(), { config: { ...cfg, allowNonGA: true }, extra });
+  const row = (id) => db.prepare('SELECT * FROM contacts WHERE id=?').get(id);
+  assert.equal(row('6').lat, null);
+  assert.match(row('6').unmapped_reason, /says Georgia but geocoded outside/);
+  assert.equal(row('7').lat, 25.76);
 });
