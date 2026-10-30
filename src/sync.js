@@ -53,7 +53,9 @@ async function runSync({ db, config, hubspot, provider, geocoder, log = console.
   log(`Skipped ${skipped} contacts outside Georgia (ALLOW_NON_GA=${config.allowNonGA}).`);
 
   // 3. Companies: each contact belongs to its primary company; contacts without one stay individuals.
-  const companyIds = [...new Set(contacts.map((c) => c.primaryCompanyId).filter(Boolean))];
+  // Plus every company that has a closed-won deal, even if no contact is linked to it.
+  const purchasingIds = provider.getPurchasingCompanyIds ? await provider.getPurchasingCompanyIds() : [];
+  const companyIds = [...new Set([...contacts.map((c) => c.primaryCompanyId).filter(Boolean), ...purchasingIds])];
   const companyRecords = await hubspot.fetchCompanies(companyIds);
   const companiesById = new Map(companyRecords.map((co) => [String(co.id), co]));
   const peopleByCompany = new Map();
@@ -76,6 +78,7 @@ async function runSync({ db, config, hubspot, provider, geocoder, log = console.
   for (const id of companyIds) {
     const people = peopleByCompany.get(id) || [];
     const record = companiesById.get(id);
+    if (!record && !people.length) continue; // deal points at a company that no longer exists
     const props = (record && record.properties) || {};
     const loc = resolveCompanyLocation(record, people);
     if (!passesStateFilter(loc.state, config.allowNonGA)) { skippedCompanies.add(id); skipped += people.length; continue; }
@@ -154,7 +157,7 @@ async function runSync({ db, config, hubspot, provider, geocoder, log = console.
 
   const summary = {
     fetched: all.length, skippedNonGA: skipped,
-    companies: companyRows.length, companiesMapped, companiesUnmapped,
+    companies: companyRows.length, companiesWithoutPeople: companyRows.filter((r) => !peopleByCompany.has(r.id)).length, companiesMapped, companiesUnmapped,
     individuals: individualsMapped + individualsUnmapped, individualsMapped, individualsUnmapped,
     people: contactRows.length - (individualsMapped + individualsUnmapped),
     pruned, geocodeCacheHits: geocoder.stats.cacheHits, geocodeApiCalls: geocoder.stats.apiCalls,

@@ -24,15 +24,21 @@ const COMPANIES = {
   c2: { name: 'Ghost Co' },
   c3: { name: 'Beach Co', address: '5 Ocean Dr', city: 'Miami', state: 'FL', zip: '33101' },
   c4: { name: 'No Address Co' },
+  c5: { name: 'Deal Only Co', address: '7 Mill St', city: 'Macon', state: 'GA', zip: '31201' },
 };
 
-function fakeHubspot(extra = [], companyDeals = { c1: ['d2'] }) {
+function fakeHubspot(extra = [], companyDeals = { c1: ['d2'], c5: ['d5'] }) {
   return {
     fetchAllContacts: async () => [...BASE, ...extra],
     fetchCompanies: async (ids) => ids.filter((id) => COMPANIES[id]).map((id) => ({ id, properties: COMPANIES[id] })),
     fetchCompanyDealIds: async (ids) => new Map(ids.map((id) => [id, companyDeals[id] || []])),
     fetchDeals: async (ids) => ids.map((id) => ({ id, properties: { pipeline: 'default', dealstage: 'won', closedate: id === 'd2' ? '2026-02-01T00:00:00Z' : '2025-05-01T00:00:00Z' } })),
     fetchClosedWonStages: async () => new Set(['default:won']),
+    // d5 is a won deal on a company that has no contacts; d6 is not won.
+    fetchAllDeals: async () => [
+      { id: 'd5', properties: { pipeline: 'default', dealstage: 'won' }, associations: { companies: { results: [{ id: 'c5' }] } } },
+      { id: 'd6', properties: { pipeline: 'default', dealstage: 'open' }, associations: { companies: { results: [{ id: 'c4' }] } } },
+    ],
   };
 }
 
@@ -75,8 +81,9 @@ test('people are grouped under their company, which is placed and aggregated; in
   const s = await run(db, fakeGoogle());
   assert.equal(s.fetched, 7);
   assert.equal(s.skippedNonGA, 1);                       // Cy (FL)
-  assert.equal(s.companies, 2);
-  assert.equal(s.companiesMapped, 1);                    // Acme
+  assert.equal(s.companies, 3);                          // Acme, Ghost Co, and Deal Only Co (won deal, no contacts)
+  assert.equal(s.companiesWithoutPeople, 1);
+  assert.equal(s.companiesMapped, 2);                    // Acme, Deal Only Co
   assert.equal(s.companiesUnmapped, 1);                  // Ghost Co has no address anywhere
   assert.equal(s.individuals, 3);                        // Ann, Di, Ed
   assert.equal(s.individualsMapped, 1);
@@ -90,6 +97,11 @@ test('people are grouped under their company, which is placed and aggregated; in
   assert.equal(acme.last_purchase, '2026-02-01T00:00:00.000Z');   // from the deal attached to the company itself
   assert.equal(acme.last_contacted, '2026-05-01T00:00:00.000Z');  // latest across its people
   assert.match(companyRow(db, 'c2').unmapped_reason, /No address/);
+  const dealOnly = companyRow(db, 'c5');                   // a customer with a won deal but no contacts is still on the map
+  assert.equal(dealOnly.name, 'Deal Only Co');
+  assert.equal(dealOnly.lat != null, true);
+  assert.equal(dealOnly.last_purchase, '2025-05-01T00:00:00.000Z');
+  assert.equal(companyRow(db, 'c4'), undefined);           // open deal only: not a purchase, no people -> not created
 
   assert.equal(contactRow(db, '2').company_id, 'c1');
   assert.equal(contactRow(db, '2').lat, null);            // shown inside the company, not on its own
@@ -106,12 +118,12 @@ test('sync is idempotent and geocodes each address only once', async () => {
   const google = fakeGoogle();
   await run(db, google);
   const first = google.calls.length;
-  assert.equal(first, 3);                                  // Atlanta, Rome, "nowhere" (not found)
+  assert.equal(first, 4);                                  // Atlanta, Rome, Macon, "nowhere" (not found)
   const again = await run(db, google);
   assert.equal(google.calls.length, first);
   assert.equal(again.geocodeApiCalls, 0);
   assert.equal(db.prepare('SELECT COUNT(*) n FROM contacts').get().n, 6);
-  assert.equal(db.prepare('SELECT COUNT(*) n FROM companies').get().n, 2);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM companies').get().n, 3);
 });
 
 test('a company with no address of its own is placed at a person\'s address and flagged', async () => {

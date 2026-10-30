@@ -13,7 +13,7 @@ contact were.
 | 🟡 Yellow | Bought before (`RECENT_DAYS` to `COLD_DAYS` ago) and contacted within `RECENT_DAYS` |
 | 🔴 Red | Bought before (`RECENT_DAYS` to `COLD_DAYS` ago) and **not** contacted within `RECENT_DAYS` |
 | 🧊 Ice cube | Last purchase `COLD_DAYS` (default 365) or more ago. Replaces the dot. |
-| ⚪ Grey | Never purchased (no closed-won deal), however recently they were contacted |
+| ⚪ Grey | No purchase on record (no closed-won deal in HubSpot), however recently they were contacted |
 
 A company's dates combine its own deals and all of its people: its last purchase is the most recent closed-won deal on
 the company or any of its people, and its last contact is the most recent across the company and its people.
@@ -91,6 +91,7 @@ No write scopes are requested, and the app never writes to HubSpot.
   at the address of one of its people if the company has none (the popup says so). People inside a company are not
   geocoded separately. Contacts with no company are geocoded on their own address.
 - **Company purchases:** deals attached directly to the company count as well as deals attached to its people.
+  Every company with a closed-won deal is on the map, even if no contact is linked to it.
 
 ### Shopify purchase provider (optional)
 

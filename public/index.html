@@ -121,7 +121,7 @@
       case 'yellow': return 'Bought before; contacted in the last ' + cfg.recentDays + ' days';
       case 'red': return 'Bought before; no contact in ' + cfg.recentDays + ' days';
       case 'ice': return 'No purchase in ' + cfg.coldDays + '+ days';
-      default: return 'Never purchased';
+      default: return 'No purchase on record';
     }
   }
   function linkTo(c) {
@@ -147,6 +147,10 @@
     if (c.kind === 'company' && c.locationSource === 'contact') root.appendChild(el('div', { 'class': 'flag', text: 'Location from a contact’s address' }));
     var a = linkTo(c);
     if (a) { var p = el('div'); p.style.marginTop = '6px'; p.appendChild(a); root.appendChild(p); }
+    if (c.kind === 'company' && !c.people.length) {
+      var none = el('div', { 'class': 'people' }, [el('div', { 'class': 'pm', text: 'No contacts are linked to this company in HubSpot.' })]);
+      root.appendChild(none);
+    }
     if (c.kind === 'company' && c.people.length) {
       var ul = el('ul');
       c.people.forEach(function (p) {
@@ -245,7 +249,7 @@
       yellow: 'Bought ' + r + '–' + c + ' days ago; contacted in the last ' + r + ' days',
       red: 'Bought ' + r + '–' + c + ' days ago; no contact in ' + r + ' days',
       ice: 'No purchase in ' + c + '+ days',
-      grey: 'Never purchased'
+      grey: 'No purchase on record'
     };
     var names = { green: 'Green', yellow: 'Yellow', red: 'Red', ice: 'Ice cube', grey: 'Grey' };
     ORDER.forEach(function (k) {
@@ -268,7 +272,7 @@
       var mark;
       if (c.status === 'ice') { mark = el('span', { 'class': 'dot' }); mark.style.background = '#7dd3fc'; }
       else { mark = el('span', { 'class': 'dot' }); mark.style.background = COLORS[c.status]; }
-      var sub = c.kind === 'company' ? (c.people.length + (c.people.length === 1 ? ' person' : ' people')) : (c.company || 'Individual');
+      var sub = c.kind === 'company' ? (c.people.length ? c.people.length + (c.people.length === 1 ? ' person' : ' people') : 'No contacts linked') : (c.company || 'Individual');
       var li = el('li', {}, [
         el('div', { 'class': 'n' }, [mark, document.createTextNode(c.name)]),
         el('div', { text: sub }),
