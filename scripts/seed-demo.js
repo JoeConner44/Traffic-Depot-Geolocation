@@ -1,21 +1,20 @@
-// Loads ~200 fake Georgia contacts so the map can be demoed without HubSpot/Google credentials.
-// Replaces any previous demo rows; real contacts (non-"demo-" ids) are left alone.
+// Loads fake Georgia data so the map can be demoed without HubSpot/Google credentials:
+// ~70 companies (1-4 people each) plus a few individuals, with every status represented.
+// Replaces any previous demo rows; real data (non-"demo-" ids) is left alone.
 const { openDb } = require('../src/db');
-const { DAY_MS } = require('../src/status');
+const { DAY_MS, latestDate } = require('../src/status');
 
 const CITIES = [
-  ['Atlanta', 33.749, -84.388, 36], ['Savannah', 32.0809, -81.0912, 14], ['Augusta', 33.4735, -82.0105, 12],
-  ['Columbus', 32.4609, -84.9877, 12], ['Macon', 32.8407, -83.6324, 12], ['Athens', 33.9519, -83.3576, 10],
-  ['Albany', 31.5785, -84.1557, 8], ['Valdosta', 30.8327, -83.2785, 8], ['Roswell', 34.0232, -84.3616, 8],
-  ['Marietta', 33.9526, -84.5499, 10], ['Gainesville', 34.2979, -83.8241, 7], ['Rome', 34.2570, -85.1647, 6],
-  ['Dalton', 34.7698, -84.9702, 6], ['Warner Robins', 32.6130, -83.6242, 7], ['Brunswick', 31.1499, -81.4915, 5],
-  ['Statesboro', 32.4488, -81.7832, 5], ['Douglas', 31.5088, -82.8499, 4], ['Tifton', 31.4505, -83.5085, 4],
-  ['Carrollton', 33.5801, -85.0766, 5], ['Peachtree City', 33.3968, -84.5955, 6], ['Duluth', 33.9829, -84.1446, 6],
+  ['Atlanta', 33.749, -84.388, 12], ['Savannah', 32.0809, -81.0912, 5], ['Augusta', 33.4735, -82.0105, 5],
+  ['Columbus', 32.4609, -84.9877, 5], ['Macon', 32.8407, -83.6324, 5], ['Athens', 33.9519, -83.3576, 4],
+  ['Albany', 31.5785, -84.1557, 3], ['Valdosta', 30.8327, -83.2785, 3], ['Roswell', 34.0232, -84.3616, 3],
+  ['Marietta', 33.9526, -84.5499, 4], ['Gainesville', 34.2979, -83.8241, 3], ['Rome', 34.2570, -85.1647, 2],
+  ['Dalton', 34.7698, -84.9702, 2], ['Warner Robins', 32.6130, -83.6242, 3], ['Brunswick', 31.1499, -81.4915, 2],
+  ['Statesboro', 32.4488, -81.7832, 2], ['Tifton', 31.4505, -83.5085, 2], ['Peachtree City', 33.3968, -84.5955, 2],
 ];
 const FIRST = ['James','Maria','Robert','Linda','Michael','Patricia','David','Jennifer','William','Elizabeth','Marcus','Tasha','Carlos','Aisha','Derek','Priya','Kevin','Latoya','Brian','Nicole'];
 const LAST = ['Johnson','Williams','Brown','Davis','Miller','Wilson','Moore','Taylor','Anderson','Thomas','Jackson','White','Harris','Martin','Thompson','Garcia','Martinez','Robinson','Clark','Lewis'];
 const BIZ = ['Paving','Signs & Safety','Construction','Electric','Barricade Rentals','Landscaping','Utilities','Contracting','Highway Supply','Excavating'];
-const STREETS = ['Peachtree St','Main St','Oak Ave','Industrial Blvd','Cherokee Dr','Magnolia Ln','Church St','Lakeview Rd'];
 
 // Small deterministic PRNG so the demo looks the same every run.
 let seed = 20240607;
@@ -27,57 +26,87 @@ function main() {
   const now = Date.now();
   const nowIso = new Date(now).toISOString();
   const daysAgo = (d) => new Date(now - d * DAY_MS).toISOString();
-  const insert = db.prepare(`
-    INSERT INTO contacts (id, firstname, lastname, email, company, address, city, state, zip, location_source,
-      last_contacted, last_purchase, lat, lng, unmapped_reason, updated_at)
-    VALUES (@id, @firstname, @lastname, @email, @company, @address, @city, @state, @zip, @location_source,
-      @last_contacted, @last_purchase, @lat, @lng, @unmapped_reason, @updated_at)`);
 
-  const rows = [];
-  let n = 0;
+  // Purchase history for one person: green / bought-before (yellow or red) / gone cold (ice) / never (grey).
+  const history = () => {
+    const r = rnd();
+    let lastPurchase = null;
+    if (r < 0.18) lastPurchase = daysAgo(Math.floor(rnd() * 85));
+    else if (r < 0.38) lastPurchase = daysAgo(95 + Math.floor(rnd() * 265));
+    else if (r < 0.60) lastPurchase = daysAgo(370 + Math.floor(rnd() * 700));
+    const lastContacted = rnd() < 0.55 ? daysAgo(Math.floor(rnd() * 80)) : (rnd() < 0.7 ? daysAgo(95 + Math.floor(rnd() * 500)) : null);
+    return { last_purchase: lastPurchase, last_contacted: lastContacted };
+  };
+
+  const companies = [], people = [];
+  let n = 0, c = 0;
+  const newPerson = (companyId, company) => {
+    n++;
+    const first = pick(FIRST), last = pick(LAST);
+    return { id: `demo-${n}`, firstname: first, lastname: last, email: `${first}.${last}${n}@example.com`.toLowerCase(),
+      company, address: '', city: '', state: 'GA', zip: '', company_id: companyId, location_source: null,
+      ...history(), lat: null, lng: null, unmapped_reason: null, updated_at: nowIso };
+  };
+
   for (const [city, lat, lng, count] of CITIES) {
     for (let i = 0; i < count; i++) {
-      n++;
-      const first = pick(FIRST), last = pick(LAST);
-      const roll = rnd();
-      // ~30% bought recently, ~25% contacted only, rest stale
-      let lastPurchase = null, lastContacted = null;
-      if (roll < 0.30) { lastPurchase = daysAgo(Math.floor(rnd() * 85)); lastContacted = daysAgo(Math.floor(rnd() * 120)); }
-      else if (roll < 0.55) { lastPurchase = rnd() < 0.6 ? daysAgo(95 + Math.floor(rnd() * 600)) : null; lastContacted = daysAgo(Math.floor(rnd() * 85)); }
-      else { lastPurchase = rnd() < 0.5 ? daysAgo(100 + Math.floor(rnd() * 900)) : null; lastContacted = rnd() < 0.7 ? daysAgo(95 + Math.floor(rnd() * 500)) : null; }
-      rows.push({
-        id: `demo-${n}`, firstname: first, lastname: last,
-        email: `${first}.${last}${n}@example.com`.toLowerCase(),
-        company: `${last} ${pick(BIZ)}`,
-        address: `${100 + Math.floor(rnd() * 8900)} ${pick(STREETS)}`, city, state: 'GA',
-        zip: String(30000 + Math.floor(rnd() * 1999)),
-        location_source: rnd() < 0.08 ? 'company' : 'contact',
-        last_contacted: lastContacted, last_purchase: lastPurchase,
-        lat: lat + (rnd() - 0.5) * 0.14, lng: lng + (rnd() - 0.5) * 0.18,
-        unmapped_reason: null, updated_at: nowIso,
+      c++;
+      const name = `${pick(LAST)} ${pick(BIZ)}`;
+      const id = `demo-c${c}`;
+      const staff = Array.from({ length: 1 + Math.floor(rnd() * 4) }, () => newPerson(id, name));
+      staff.forEach((p) => { p.city = city; });
+      people.push(...staff);
+      companies.push({
+        id, name, address: `${100 + Math.floor(rnd() * 8900)} Industrial Blvd`, city, state: 'GA',
+        zip: String(30000 + Math.floor(rnd() * 1999)), location_source: 'company',
+        last_contacted: latestDate(...staff.map((p) => p.last_contacted)),
+        last_purchase: latestDate(...staff.map((p) => p.last_purchase)),
+        lat: lat + (rnd() - 0.5) * 0.14, lng: lng + (rnd() - 0.5) * 0.18, unmapped_reason: null, updated_at: nowIso,
       });
     }
   }
-  // A handful that can't be placed, to show the sidebar panel.
-  const reasons = ['No address, city or ZIP on the contact or its company', 'Address could not be geocoded (12 nowhere rd, ga)', 'Geocoded outside Georgia (123 main st, ga)'];
-  for (let i = 0; i < 9; i++) {
-    n++;
-    const first = pick(FIRST), last = pick(LAST);
-    rows.push({
-      id: `demo-${n}`, firstname: first, lastname: last, email: `${first}.${last}${n}@example.com`.toLowerCase(),
-      company: `${last} ${pick(BIZ)}`, address: '', city: '', state: '', zip: '', location_source: null,
-      last_contacted: rnd() < 0.5 ? daysAgo(Math.floor(rnd() * 200)) : null, last_purchase: rnd() < 0.3 ? daysAgo(Math.floor(rnd() * 400)) : null,
-      lat: null, lng: null, unmapped_reason: reasons[i % reasons.length], updated_at: nowIso,
-    });
+  // Individuals with no company (mapped), then some that can't be placed.
+  for (let i = 0; i < 8; i++) {
+    const [city, lat, lng] = pick(CITIES);
+    const p = newPerson(null, '');
+    Object.assign(p, { company: `${p.lastname} ${pick(BIZ)}`, city, location_source: 'contact',
+      lat: lat + (rnd() - 0.5) * 0.14, lng: lng + (rnd() - 0.5) * 0.18 });
+    people.push(p);
+  }
+  for (let i = 0; i < 3; i++) {
+    c++;
+    const name = `${pick(LAST)} ${pick(BIZ)}`, id = `demo-c${c}`;
+    const staff = [newPerson(id, name), newPerson(id, name)];
+    people.push(...staff);
+    companies.push({ id, name, address: '', city: '', state: '', zip: '', location_source: null,
+      last_contacted: latestDate(...staff.map((p) => p.last_contacted)), last_purchase: latestDate(...staff.map((p) => p.last_purchase)),
+      lat: null, lng: null, unmapped_reason: 'No address, city or ZIP on the company or any of its people', updated_at: nowIso });
+  }
+  for (let i = 0; i < 4; i++) {
+    const p = newPerson(null, `${pick(LAST)} ${pick(BIZ)}`);
+    Object.assign(p, { state: '', location_source: 'contact', unmapped_reason: i % 2 ? 'Address could not be geocoded (12 nowhere rd, ga)' : 'No address, city or ZIP on the contact' });
+    people.push(p);
   }
 
+  const insContact = db.prepare(`
+    INSERT INTO contacts (id, firstname, lastname, email, company, address, city, state, zip, company_id, location_source,
+      last_contacted, last_purchase, lat, lng, unmapped_reason, updated_at)
+    VALUES (@id, @firstname, @lastname, @email, @company, @address, @city, @state, @zip, @company_id, @location_source,
+      @last_contacted, @last_purchase, @lat, @lng, @unmapped_reason, @updated_at)`);
+  const insCompany = db.prepare(`
+    INSERT INTO companies (id, name, address, city, state, zip, location_source, last_contacted, last_purchase,
+      lat, lng, unmapped_reason, updated_at)
+    VALUES (@id, @name, @address, @city, @state, @zip, @location_source, @last_contacted, @last_purchase,
+      @lat, @lng, @unmapped_reason, @updated_at)`);
   db.transaction(() => {
     db.prepare("DELETE FROM contacts WHERE id LIKE 'demo-%'").run();
-    for (const r of rows) insert.run(r);
+    db.prepare("DELETE FROM companies WHERE id LIKE 'demo-%'").run();
+    companies.forEach((r) => insCompany.run(r));
+    people.forEach((r) => insContact.run(r));
     db.prepare('INSERT INTO sync_runs (started_at, finished_at, ok, summary) VALUES (?, ?, 1, ?)')
-      .run(nowIso, nowIso, JSON.stringify({ demo: true, contacts: rows.length }));
+      .run(nowIso, nowIso, JSON.stringify({ demo: true, companies: companies.length, people: people.length }));
   })();
-  console.log(`Seeded ${rows.length} demo contacts (${rows.filter((r) => r.lat == null).length} unmapped) into ${db.name}`);
+  console.log(`Seeded ${companies.length} companies and ${people.length} people into ${db.name}`);
   db.close();
 }
 

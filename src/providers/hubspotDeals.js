@@ -16,15 +16,20 @@ function lastPurchaseFromDeals(dealIds, dealsById, closedWonStages) {
 function createHubspotDealsProvider({ hubspot }) {
   return {
     name: 'hubspot_deals',
-    // contacts: shaped contacts; returns Map(contactId -> ISO date | null)
-    async getLastPurchases(contacts) {
+    // contacts: shaped contacts; companyIds: ids of their companies.
+    // Returns { byContact: Map(contactId -> ISO|null), byCompany: Map(companyId -> ISO|null) }
+    async getLastPurchases(contacts, companyIds = []) {
       const closedWon = await hubspot.fetchClosedWonStages();
       if (closedWon.size === 0) console.warn('No closed-won deal stages found in HubSpot pipelines; all purchases will be empty.');
-      const deals = await hubspot.fetchDeals(contacts.flatMap((c) => c.dealIds));
+      const companyDeals = companyIds.length ? await hubspot.fetchCompanyDealIds(companyIds) : new Map();
+      const dealIds = contacts.flatMap((c) => c.dealIds).concat([...companyDeals.values()].flat());
+      const deals = await hubspot.fetchDeals(dealIds);
       const byId = new Map(deals.map((d) => [String(d.id), d]));
-      const out = new Map();
-      for (const c of contacts) out.set(c.id, lastPurchaseFromDeals(c.dealIds, byId, closedWon));
-      return out;
+      const byContact = new Map();
+      for (const c of contacts) byContact.set(c.id, lastPurchaseFromDeals(c.dealIds, byId, closedWon));
+      const byCompany = new Map();
+      for (const id of companyIds) byCompany.set(id, lastPurchaseFromDeals(companyDeals.get(id) || [], byId, closedWon));
+      return { byContact, byCompany };
     },
   };
 }

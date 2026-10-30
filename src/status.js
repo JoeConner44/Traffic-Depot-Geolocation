@@ -28,11 +28,18 @@ function isRecent(value, now, recentDays) {
   return now - t <= recentDays * DAY_MS; // future dates (clock skew) count as recent
 }
 
-// GREEN: recent purchase. YELLOW: no recent purchase but recently contacted. RED: neither.
-function computeStatus({ lastPurchase, lastContacted }, { now = Date.now(), recentDays = 90 } = {}) {
+// Status of a company (or an individual contact):
+//   grey   never purchased (no closed-won deal), whatever the contact history
+//   green  last purchase within recentDays
+//   ice    last purchase coldDays or more ago ("gone cold"; replaces yellow/red)
+//   yellow bought before (recentDays..coldDays ago) and contacted within recentDays
+//   red    bought before (recentDays..coldDays ago) and not contacted within recentDays
+function computeStatus({ lastPurchase, lastContacted }, { now = Date.now(), recentDays = 90, coldDays = 365 } = {}) {
+  const bought = toTime(lastPurchase);
+  if (bought == null) return 'grey';
   if (isRecent(lastPurchase, now, recentDays)) return 'green';
-  if (isRecent(lastContacted, now, recentDays)) return 'yellow';
-  return 'red';
+  if (now - bought >= coldDays * DAY_MS) return 'ice';
+  return isRecent(lastContacted, now, recentDays) ? 'yellow' : 'red';
 }
 
 module.exports = { DAY_MS, toTime, latestDate, isRecent, computeStatus };

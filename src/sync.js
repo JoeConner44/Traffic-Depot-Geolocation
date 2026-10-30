@@ -6,7 +6,7 @@ const { createHubSpotClient, shapeContact } = require('./hubspot');
 const { createPurchaseProvider } = require('./providers');
 const { createGeocoder } = require('./geocode');
 const { latestDate } = require('./status');
-const { passesStateFilter, normalizeAddress, resolveLocation } = require('./location');
+const { passesStateFilter, normalizeAddress, resolveCompanyLocation } = require('./location');
 const { normalizeState } = require('./states');
 
 const LOCK_STALE_MS = 2 * 3600 * 1000;
@@ -30,83 +30,134 @@ function expectedState(state, config) {
   return normalizeState(state) || (config.allowNonGA ? '' : 'GA');
 }
 
+// Geocode one place. Returns { coords, reason } where coords is { lat, lng, state } or null.
+async function geocodePlace(loc, geocoder, config, nothingToGeocode) {
+  const key = normalizeAddress(loc, { allowNonGA: config.allowNonGA });
+  if (!key) return { coords: null, reason: nothingToGeocode };
+  const want = expectedState(loc.state, config);
+  const coords = await geocoder.geocode(key, want);
+  if (!coords) return { coords: null, reason: `Address could not be geocoded (${key})` };
+  if (want && coords.state && coords.state !== want) return { coords: null, reason: `Address says ${want} but geocoded to ${coords.state} (${key})` };
+  return { coords, reason: null };
+}
+
 async function runSync({ db, config, hubspot, provider, geocoder, log = console.log }) {
   // 1. Contacts (+ association ids)
   const raw = await hubspot.fetchAllContacts();
   const all = raw.map(shapeContact);
   log(`Fetched ${all.length} contacts from HubSpot.`);
 
-  // 2. State filter (before any geocoding or deal lookups)
+  // 2. State filter on the contact's own state (before any geocoding or deal lookups)
   const contacts = all.filter((c) => passesStateFilter(c.state, config.allowNonGA));
-  const skippedState = all.length - contacts.length;
-  log(`Skipped ${skippedState} contacts outside Georgia (ALLOW_NON_GA=${config.allowNonGA}).`);
+  let skipped = all.length - contacts.length;
+  log(`Skipped ${skipped} contacts outside Georgia (ALLOW_NON_GA=${config.allowNonGA}).`);
 
-  // 3. Company records, only for contacts that need the address fallback
-  const needsCompany = contacts.filter((c) => !normalizeAddress(c, { allowNonGA: true }) && c.companyIds.length);
-  const companies = await hubspot.fetchCompanies(needsCompany.flatMap((c) => c.companyIds));
-  const companiesById = new Map(companies.map((co) => [String(co.id), co]));
+  // 3. Companies: each contact belongs to its primary company; contacts without one stay individuals.
+  const companyIds = [...new Set(contacts.map((c) => c.primaryCompanyId).filter(Boolean))];
+  const companyRecords = await hubspot.fetchCompanies(companyIds);
+  const companiesById = new Map(companyRecords.map((co) => [String(co.id), co]));
+  const peopleByCompany = new Map();
+  for (const c of contacts) {
+    if (!c.primaryCompanyId) continue;
+    if (!peopleByCompany.has(c.primaryCompanyId)) peopleByCompany.set(c.primaryCompanyId, []);
+    peopleByCompany.get(c.primaryCompanyId).push(c);
+  }
 
-  // 4. Purchases
-  const purchases = await provider.getLastPurchases(contacts);
+  // 4. Purchases (people, and deals attached directly to companies)
+  const purchases = await provider.getLastPurchases(contacts, companyIds);
   log(`Purchase dates resolved via ${provider.name}.`);
 
-  // 5. Geocode + build rows
+  // 5. Companies: location, geocode, aggregate dates
   const now = new Date().toISOString();
-  const rows = [];
-  let mapped = 0, unmapped = 0, fromCompany = 0, skippedCompanyState = 0;
-  for (const c of contacts) {
-    const loc = resolveLocation(c, companiesById);
-    if (loc.source === 'company' && !passesStateFilter(loc.state, config.allowNonGA)) { skippedCompanyState++; continue; }
+  const contactedAt = (c) => latestDate(c.notesLastContacted, c.lastSalesActivity, config.includeEmailSendDate ? c.emailLastSend : null);
+  const companyRows = [];
+  const skippedCompanies = new Set();
+  let companiesMapped = 0, companiesUnmapped = 0;
+  for (const id of companyIds) {
+    const people = peopleByCompany.get(id) || [];
+    const record = companiesById.get(id);
+    const props = (record && record.properties) || {};
+    const loc = resolveCompanyLocation(record, people);
+    if (!passesStateFilter(loc.state, config.allowNonGA)) { skippedCompanies.add(id); skipped += people.length; continue; }
 
-    const key = normalizeAddress(loc, { allowNonGA: config.allowNonGA });
-    let coords = null;
-    let reason = null;
-    if (!key) reason = 'No address, city or ZIP on the contact or its company';
-    else {
-      const want = expectedState(loc.state, config);
-      coords = await geocoder.geocode(key, want);
-      if (!coords) reason = `Address could not be geocoded (${key})`;
-      else if (want && coords.state && coords.state !== want) { reason = `Address says ${want} but geocoded to ${coords.state} (${key})`; coords = null; }
-    }
-    coords ? mapped++ : unmapped++;
-    if (loc.source === 'company') fromCompany++;
-
-    rows.push({
-      id: c.id,
-      firstname: c.firstname, lastname: c.lastname, email: c.email,
-      company: c.company || loc.companyName || '',
+    const { coords, reason } = await geocodePlace(loc, geocoder, config, 'No address, city or ZIP on the company or any of its people');
+    coords ? companiesMapped++ : companiesUnmapped++;
+    companyRows.push({
+      id,
+      name: props.name || (people.find((p) => p.company) || {}).company || '(unnamed company)',
       address: loc.address, city: loc.city, state: loc.state || (coords && coords.state) || '', zip: loc.zip,
       location_source: loc.source,
-      last_contacted: latestDate(c.notesLastContacted, c.lastSalesActivity, config.includeEmailSendDate ? c.emailLastSend : null),
-      last_purchase: purchases.get(c.id) || null,
+      last_contacted: latestDate(props.notes_last_contacted, props.hs_last_sales_activity_timestamp, ...people.map(contactedAt)),
+      last_purchase: latestDate(purchases.byCompany.get(id), ...people.map((p) => purchases.byContact.get(p.id))),
       lat: coords ? coords.lat : null, lng: coords ? coords.lng : null,
       unmapped_reason: coords ? null : reason,
       updated_at: now,
     });
   }
-  if (skippedCompanyState) log(`Skipped ${skippedCompanyState} more contacts whose company address is outside Georgia.`);
+  if (skippedCompanies.size) log(`Skipped ${skippedCompanies.size} companies (and their people) whose address is outside Georgia.`);
 
-  // 6. Write atomically. Anything not touched by this run (deleted in HubSpot, now filtered out, or demo data)
-  //    is pruned, so the table always mirrors the latest successful sync.
-  const upsert = db.prepare(`
-    INSERT INTO contacts (id, firstname, lastname, email, company, address, city, state, zip, location_source,
+  // 6. Contacts. People in a company are shown inside it, so they are not geocoded themselves; individuals are.
+  const companyRowsById = new Map(companyRows.map((r) => [r.id, r]));
+  const contactRows = [];
+  let individualsMapped = 0, individualsUnmapped = 0;
+  for (const c of contacts) {
+    if (c.primaryCompanyId && skippedCompanies.has(c.primaryCompanyId)) continue;
+    const inCompany = !!c.primaryCompanyId;
+    let coords = null, reason = null;
+    const loc = { address: c.address, city: c.city, state: c.state, zip: c.zip };
+    if (!inCompany) {
+      ({ coords, reason } = await geocodePlace(loc, geocoder, config, 'No address, city or ZIP on the contact'));
+      coords ? individualsMapped++ : individualsUnmapped++;
+    }
+    const company = inCompany ? companyRowsById.get(c.primaryCompanyId) : null;
+    contactRows.push({
+      id: c.id,
+      firstname: c.firstname, lastname: c.lastname, email: c.email,
+      company: c.company || (company ? company.name : ''),
+      address: c.address, city: c.city, state: c.state || (coords && coords.state) || '', zip: c.zip,
+      company_id: inCompany ? c.primaryCompanyId : null,
+      location_source: inCompany ? null : 'contact',
+      last_contacted: contactedAt(c),
+      last_purchase: purchases.byContact.get(c.id) || null,
+      lat: coords ? coords.lat : null, lng: coords ? coords.lng : null,
+      unmapped_reason: coords || inCompany ? null : reason,
+      updated_at: now,
+    });
+  }
+
+  // 7. Write atomically. Anything not touched by this run (deleted in HubSpot, now filtered out, or demo data)
+  //    is pruned, so the tables always mirror the latest successful sync.
+  const upsertContact = db.prepare(`
+    INSERT INTO contacts (id, firstname, lastname, email, company, address, city, state, zip, company_id, location_source,
       last_contacted, last_purchase, lat, lng, unmapped_reason, updated_at)
-    VALUES (@id, @firstname, @lastname, @email, @company, @address, @city, @state, @zip, @location_source,
+    VALUES (@id, @firstname, @lastname, @email, @company, @address, @city, @state, @zip, @company_id, @location_source,
       @last_contacted, @last_purchase, @lat, @lng, @unmapped_reason, @updated_at)
     ON CONFLICT(id) DO UPDATE SET firstname=@firstname, lastname=@lastname, email=@email, company=@company,
-      address=@address, city=@city, state=@state, zip=@zip, location_source=@location_source,
+      address=@address, city=@city, state=@state, zip=@zip, company_id=@company_id, location_source=@location_source,
       last_contacted=@last_contacted, last_purchase=@last_purchase, lat=@lat, lng=@lng,
       unmapped_reason=@unmapped_reason, updated_at=@updated_at`);
+  const upsertCompany = db.prepare(`
+    INSERT INTO companies (id, name, address, city, state, zip, location_source, last_contacted, last_purchase,
+      lat, lng, unmapped_reason, updated_at)
+    VALUES (@id, @name, @address, @city, @state, @zip, @location_source, @last_contacted, @last_purchase,
+      @lat, @lng, @unmapped_reason, @updated_at)
+    ON CONFLICT(id) DO UPDATE SET name=@name, address=@address, city=@city, state=@state, zip=@zip,
+      location_source=@location_source, last_contacted=@last_contacted, last_purchase=@last_purchase,
+      lat=@lat, lng=@lng, unmapped_reason=@unmapped_reason, updated_at=@updated_at`);
   let pruned = 0;
   db.transaction(() => {
-    for (const r of rows) upsert.run(r);
-    pruned = db.prepare('DELETE FROM contacts WHERE updated_at <> ?').run(now).changes;
+    for (const r of companyRows) upsertCompany.run(r);
+    for (const r of contactRows) upsertContact.run(r);
+    pruned = db.prepare('DELETE FROM contacts WHERE updated_at <> ?').run(now).changes
+      + db.prepare('DELETE FROM companies WHERE updated_at <> ?').run(now).changes;
   })();
 
   const summary = {
-    fetched: all.length, skippedNonGA: skippedState + skippedCompanyState, stored: rows.length,
-    mapped, unmapped, addressFromCompany: fromCompany, pruned,
-    geocodeCacheHits: geocoder.stats.cacheHits, geocodeApiCalls: geocoder.stats.apiCalls,
+    fetched: all.length, skippedNonGA: skipped,
+    companies: companyRows.length, companiesMapped, companiesUnmapped,
+    individuals: individualsMapped + individualsUnmapped, individualsMapped, individualsUnmapped,
+    people: contactRows.length - (individualsMapped + individualsUnmapped),
+    pruned, geocodeCacheHits: geocoder.stats.cacheHits, geocodeApiCalls: geocoder.stats.apiCalls,
   };
   log('Sync complete:', JSON.stringify(summary));
   return summary;

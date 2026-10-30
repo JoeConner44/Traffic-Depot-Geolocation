@@ -1,0 +1,2 @@
+# Nightly HubSpot sync. Times are UTC: 09:15 = 5:15am US Eastern (4:15am in winter).
+15 9 * * * tdmap cd /opt/traffic-depot && /usr/bin/node src/sync.js >> /var/log/td-sync.log 2>&1

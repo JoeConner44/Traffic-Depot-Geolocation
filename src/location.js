@@ -50,4 +50,15 @@ function resolveLocation(contact, companiesById) {
   return { address: '', city: '', state: '', zip: '', source: null, companyName: null };
 }
 
-module.exports = { isGeorgia, passesStateFilter, inGeorgia, normalizeAddress, resolveLocation, GA_BOUNDS };
+// A company is placed at its own address, else at the address of the first of its people that has one.
+function resolveCompanyLocation(company, people) {
+  const p = (company && company.properties) || {};
+  const own = { address: p.address || '', city: p.city || '', state: p.state || '', zip: p.zip || '' };
+  if (hasLocation(own)) return { ...own, source: 'company' };
+  for (const c of people) {
+    if (hasLocation(c)) return { address: c.address, city: c.city, state: c.state, zip: c.zip, source: 'contact' };
+  }
+  return { address: '', city: '', state: '', zip: '', source: null };
+}
+
+module.exports = { resolveCompanyLocation, isGeorgia, passesStateFilter, inGeorgia, normalizeAddress, resolveLocation, GA_BOUNDS };

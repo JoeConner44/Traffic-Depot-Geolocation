@@ -94,43 +94,69 @@ function createApp({ db, cfg = config }) {
   app.use('/vendor/leaflet', express.static(path.dirname(require.resolve('leaflet/package.json')) + '/dist'));
   app.use(express.static(path.join(__dirname, '..', 'public')));
 
-  const selectAll = db.prepare('SELECT * FROM contacts');
+  const selectContacts = db.prepare('SELECT * FROM contacts');
+  const selectCompanies = db.prepare('SELECT * FROM companies');
   const lastRun = db.prepare('SELECT finished_at, ok, summary FROM sync_runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1');
   const lastOk = db.prepare('SELECT finished_at FROM sync_runs WHERE ok = 1 ORDER BY id DESC LIMIT 1');
 
+  const recordUrl = (kind, id) => {
+    if (!cfg.hubspotPortalId || String(id).startsWith('demo-')) return null;
+    return `https://app.hubspot.com/contacts/${encodeURIComponent(cfg.hubspotPortalId)}/record/${kind === 'company' ? '0-2' : '0-1'}/${encodeURIComponent(id)}`;
+  };
+
+  // Companies are the dots; their people are listed inside. Contacts with no company are individual dots.
   app.get('/api/contacts', (req, res) => {
-    const now = Date.now();
-    const out = { mapped: [], unmapped: [], counts: { green: 0, yellow: 0, red: 0, unmapped: 0 } };
-    for (const r of selectAll.all()) {
-      const status = computeStatus({ lastPurchase: r.last_purchase, lastContacted: r.last_contacted }, { now, recentDays: cfg.recentDays });
-      const demo = r.id.startsWith('demo-');
-      const mappedPoint = r.lat != null && r.lng != null;
-      // Blank state on a mapped contact: it was only accepted because it geocoded inside Georgia.
-      let state = normalizeState(r.state);
-      if (!state && mappedPoint && inGeorgia(r.lat, r.lng)) state = 'GA';
-      const c = {
-        id: r.id,
-        name: [r.firstname, r.lastname].filter(Boolean).join(' ') || r.email || '(no name)',
-        company: r.company || '',
-        city: r.city || '',
-        state,
-        lastPurchase: r.last_purchase,
-        lastContacted: r.last_contacted,
-        locationSource: r.location_source,
-        status,
-        hubspotUrl: !demo && cfg.hubspotPortalId ? `https://app.hubspot.com/contacts/${encodeURIComponent(cfg.hubspotPortalId)}/record/0-1/${encodeURIComponent(r.id)}` : null,
-      };
-      if (r.lat != null && r.lng != null) {
-        out.mapped.push({ ...c, lat: r.lat, lng: r.lng });
-        out.counts[status]++;
+    const opts = { now: Date.now(), recentDays: cfg.recentDays, coldDays: cfg.coldDays };
+    const statusOf = (r) => computeStatus({ lastPurchase: r.last_purchase, lastContacted: r.last_contacted }, opts);
+
+    const companyRows = selectCompanies.all();
+    const knownCompany = new Set(companyRows.map((r) => r.id));
+    const peopleOf = new Map();
+    const individuals = [];
+    for (const r of selectContacts.all()) {
+      if (r.company_id && knownCompany.has(r.company_id)) {
+        if (!peopleOf.has(r.company_id)) peopleOf.set(r.company_id, []);
+        peopleOf.get(r.company_id).push(r);
       } else {
-        out.unmapped.push({ ...c, reason: r.unmapped_reason });
-        out.counts.unmapped++;
+        individuals.push(r);
       }
     }
+
+    const personName = (r) => [r.firstname, r.lastname].filter(Boolean).join(' ') || '(no name)';
+    const person = (r) => ({
+      id: r.id, name: personName(r), status: statusOf(r),
+      lastPurchase: r.last_purchase, lastContacted: r.last_contacted, hubspotUrl: recordUrl('contact', r.id),
+    });
+    // Blank state on a mapped place: it was only accepted because it geocoded inside Georgia.
+    const stateOf = (r) => {
+      const st = normalizeState(r.state);
+      return st || (r.lat != null && r.lng != null && inGeorgia(r.lat, r.lng) ? 'GA' : '');
+    };
+    const place = (kind, r, name, people) => ({
+      kind, id: r.id, name, company: kind === 'person' ? r.company || '' : '',
+      city: r.city || '', state: stateOf(r), status: statusOf(r),
+      lastPurchase: r.last_purchase, lastContacted: r.last_contacted,
+      locationSource: r.location_source, hubspotUrl: recordUrl(kind, r.id),
+      people: people.map(person).sort((a, b) => (Date.parse(b.lastContacted) || 0) - (Date.parse(a.lastContacted) || 0)),
+    });
+
+    const out = { mapped: [], unmapped: [], counts: { green: 0, yellow: 0, red: 0, ice: 0, grey: 0, unmapped: 0 } };
+    const add = (item, r) => {
+      if (r.lat != null && r.lng != null) {
+        out.mapped.push({ ...item, lat: r.lat, lng: r.lng });
+        out.counts[item.status]++;
+      } else {
+        out.unmapped.push({ ...item, reason: r.unmapped_reason });
+        out.counts.unmapped++;
+      }
+    };
+    for (const r of companyRows) add(place('company', r, r.name || '(unnamed company)', peopleOf.get(r.id) || []), r);
+    for (const r of individuals) add(place('person', r, personName(r), []), r);
+
     const run = lastRun.get(), ok = lastOk.get();
     out.stateNames = STATES;
     out.recentDays = cfg.recentDays;
+    out.coldDays = cfg.coldDays;
     out.lastSync = ok ? ok.finished_at : null;
     out.lastSyncFailed = !!(run && !run.ok);
     res.set('Cache-Control', 'no-store').json(out);
@@ -142,7 +168,7 @@ function createApp({ db, cfg = config }) {
 if (require.main === module) {
   const db = openDb();
   const app = createApp({ db });
-  app.listen(config.port, () => console.log(`Traffic Depot map listening on :${config.port}`));
+  app.listen(config.port, config.host, () => console.log(`Traffic Depot map listening on ${config.host}:${config.port}`));
 }
 
 module.exports = { createApp, makeSession, validSession };

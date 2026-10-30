@@ -14,12 +14,28 @@ CREATE TABLE IF NOT EXISTS contacts (
   city             TEXT,
   state            TEXT,
   zip              TEXT,
+  company_id       TEXT,                      -- HubSpot company this person belongs to (NULL = individual)
   location_source  TEXT,                      -- 'contact' | 'company' | NULL
   last_contacted   TEXT,                      -- ISO
   last_purchase    TEXT,                      -- ISO
   lat              REAL,
   lng              REAL,
   unmapped_reason  TEXT,                      -- set when lat/lng are NULL
+  updated_at       TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS companies (
+  id               TEXT PRIMARY KEY,          -- HubSpot company id
+  name             TEXT,
+  address          TEXT,
+  city             TEXT,
+  state            TEXT,
+  zip              TEXT,
+  location_source  TEXT,                      -- 'company' | 'contact' (a person's address) | NULL
+  last_contacted   TEXT,                      -- ISO, latest across the company and its people
+  last_purchase    TEXT,                      -- ISO, latest across the company's and its people's deals
+  lat              REAL,
+  lng              REAL,
+  unmapped_reason  TEXT,
   updated_at       TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS geocode_cache (
@@ -49,6 +65,9 @@ function openDb(file = config.dbPath) {
   // Databases created before geo_state existed.
   if (!db.prepare('PRAGMA table_info(geocode_cache)').all().some((c) => c.name === 'geo_state')) {
     db.exec('ALTER TABLE geocode_cache ADD COLUMN geo_state TEXT');
+  }
+  if (!db.prepare('PRAGMA table_info(contacts)').all().some((c) => c.name === 'company_id')) {
+    db.exec('ALTER TABLE contacts ADD COLUMN company_id TEXT');
   }
   return db;
 }
