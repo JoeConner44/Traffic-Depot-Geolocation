@@ -8,3 +8,7 @@ data/*
 *.db-shm
 *.db-wal
 *.lock
+
+# Never commit data exports
+*.zip
+*.csv
