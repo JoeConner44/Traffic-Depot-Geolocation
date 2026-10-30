@@ -22,6 +22,11 @@
   .legend .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; }
   .legend .count { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 600; }
   .legend .desc { color: var(--muted); font-size: 12px; }
+  .viewbox { padding: 10px 16px 0; display: flex; gap: 0; }
+  .viewbox button { flex: 1; padding: 8px 6px; font: inherit; border: 1px solid #c7ccd4; background: #fff; color: var(--ink); cursor: pointer; }
+  .viewbox button:first-child { border-radius: 6px 0 0 6px; } .viewbox button:last-child { border-radius: 0 6px 6px 0; border-left: 0; }
+  .viewbox button[aria-pressed="true"] { background: #1d4ed8; border-color: #1d4ed8; color: #fff; font-weight: 600; }
+  .viewbox small { opacity: .8; font-weight: 400; }
   .statebox { padding: 10px 16px; border-bottom: 1px solid var(--line); }
   .statebox label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .04em; }
   .statebox select { width: 100%; padding: 7px 8px; font: inherit; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
@@ -59,6 +64,10 @@
       <form method="post" action="/logout"><button class="link" type="submit">Sign out</button></form>
     </div>
     <div id="msg"></div>
+    <div class="viewbox" role="group" aria-label="What each dot represents">
+      <button type="button" id="viewCompanies" aria-pressed="true">Companies <small id="nCompanies"></small></button>
+      <button type="button" id="viewPeople" aria-pressed="false">Individuals <small id="nPeople"></small></button>
+    </div>
     <div class="statebox"><label for="stateSel">State</label><select id="stateSel"></select></div>
     <div class="legend" id="legend"></div>
     <div class="unmapped">
@@ -189,6 +198,29 @@
       .bindPopup(function () { return popup(c); }, { maxWidth: 360, minWidth: 260 });
   }
 
+  // --- what each dot represents ---
+  // 'companies': one dot per company (plus contacts with no company). 'individuals': one dot per person; people in a
+  // company sit at the company's location.
+  var data = null, view = 'companies';
+
+  function itemsFor(v) {
+    if (v === 'companies') return { mapped: data.mapped, unmapped: data.unmapped };
+    var mapped = [], unmapped = [];
+    function person(p, c) {
+      return { kind: 'person', id: p.id, name: p.name, company: c.name, city: c.city, state: c.state, status: p.status,
+        lastPurchase: p.lastPurchase, lastContacted: p.lastContacted, locationSource: null, hubspotUrl: p.hubspotUrl, people: [] };
+    }
+    data.mapped.forEach(function (c) {
+      if (c.kind !== 'company') { mapped.push(c); return; }
+      c.people.forEach(function (p) { var i = person(p, c); i.lat = c.lat; i.lng = c.lng; mapped.push(i); });
+    });
+    data.unmapped.forEach(function (c) {
+      if (c.kind !== 'company') { unmapped.push(c); return; }
+      c.people.forEach(function (p) { var i = person(p, c); i.reason = 'Company: ' + (c.reason || 'no location'); unmapped.push(i); });
+    });
+    return { mapped: mapped, unmapped: unmapped };
+  }
+
   // --- filtering ---
   function stateKey(c) { return c.state || '?'; }
   function inState(c) { return selected === 'ALL' || stateKey(c) === selected; }
@@ -215,29 +247,23 @@
     if (refit && pts.length) map.fitBounds(pts, { padding: [30, 30], maxZoom: selected === 'ALL' ? 10 : 9 });
   }
 
-  function buildStateSelect(data) {
-    var byState = {}, total = data.mapped.length;
-    data.mapped.forEach(function (c) { byState[stateKey(c)] = (byState[stateKey(c)] || 0) + 1; });
+  // (Re)build the state dropdown for the current items, keeping the selection if it still exists.
+  function populateStateSelect(items, preferred) {
+    var byState = {};
+    items.mapped.forEach(function (c) { byState[stateKey(c)] = (byState[stateKey(c)] || 0) + 1; });
     var sel = document.getElementById('stateSel');
+    sel.textContent = '';
     var codes = Object.keys(byState).filter(function (k) { return k !== '?'; }).sort(function (a, b) {
       if (a === 'GA') return -1; if (b === 'GA') return 1;
       return (stateNames[a] || a).localeCompare(stateNames[b] || b);
     });
     function opt(value, label) { sel.appendChild(el('option', { value: value, text: label })); }
-    opt('ALL', 'All states (' + total.toLocaleString() + ')');
+    opt('ALL', 'All states (' + items.mapped.length.toLocaleString() + ')');
     codes.forEach(function (k) { opt(k, (stateNames[k] || k) + ' (' + byState[k].toLocaleString() + ')'); });
     if (byState['?']) opt('?', 'Unknown state (' + byState['?'].toLocaleString() + ')');
-
-    var saved = null;
-    try { saved = localStorage.getItem('td_state'); } catch (e) { /* storage unavailable */ }
     var valid = function (v) { return v && Array.prototype.some.call(sel.options, function (o) { return o.value === v; }); };
-    selected = valid(saved) ? saved : (byState.GA ? 'GA' : 'ALL'); // default to Georgia when there is any
+    selected = valid(preferred) ? preferred : (byState.GA ? 'GA' : 'ALL'); // default to Georgia when there is any
     sel.value = selected;
-    sel.addEventListener('change', function () {
-      selected = sel.value;
-      try { localStorage.setItem('td_state', selected); } catch (e) { /* ignore */ }
-      refresh(true);
-    });
   }
 
   function renderLegend() {
@@ -268,11 +294,13 @@
   function renderUnmapped(list) {
     var ul = document.getElementById('uList');
     ul.textContent = '';
+    unmappedLis = [];
     list.forEach(function (c) {
-      var mark;
-      if (c.status === 'ice') { mark = el('span', { 'class': 'dot' }); mark.style.background = '#7dd3fc'; }
-      else { mark = el('span', { 'class': 'dot' }); mark.style.background = COLORS[c.status]; }
-      var sub = c.kind === 'company' ? (c.people.length ? c.people.length + (c.people.length === 1 ? ' person' : ' people') : 'No contacts linked') : (c.company || 'Individual');
+      var mark = el('span', { 'class': 'dot' });
+      mark.style.background = c.status === 'ice' ? '#7dd3fc' : COLORS[c.status];
+      var sub = c.kind === 'company'
+        ? (c.people.length ? c.people.length + (c.people.length === 1 ? ' person' : ' people') : 'No contacts linked')
+        : (c.company || 'Individual');
       var li = el('li', {}, [
         el('div', { 'class': 'n' }, [mark, document.createTextNode(c.name)]),
         el('div', { text: sub }),
@@ -284,26 +312,56 @@
     });
   }
 
+  // Draw the current view: markers, unmapped list, state dropdown, counts.
+  function render(preferredState, refit) {
+    markers.forEach(function (m) { if (map.hasLayer(m.layer)) map.removeLayer(m.layer); });
+    markers = [];
+    var items = itemsFor(view);
+    var pts = jitter(items.mapped);
+    items.mapped.forEach(function (c, i) { markers.push({ c: c, layer: makeLayer(c, pts[i]) }); });
+    renderUnmapped(items.unmapped);
+    populateStateSelect(items, preferredState);
+    document.getElementById('viewCompanies').setAttribute('aria-pressed', String(view === 'companies'));
+    document.getElementById('viewPeople').setAttribute('aria-pressed', String(view === 'individuals'));
+    refresh(refit);
+  }
+
   function showError(text) {
     var m = document.getElementById('msg'); m.textContent = text; m.style.display = text ? 'block' : 'none';
   }
+
+  function store(key, value) { try { localStorage.setItem(key, value); } catch (e) { /* storage unavailable */ } }
+  function recall(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
 
   fetch('/api/contacts', { credentials: 'same-origin' }).then(function (r) {
     if (r.status === 401) { location.href = '/login'; throw new Error('unauthorized'); }
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
-  }).then(function (data) {
-    stateNames = data.stateNames || {};
-    cfg = { recentDays: data.recentDays, coldDays: data.coldDays };
-    var pts = jitter(data.mapped);
-    data.mapped.forEach(function (c, i) { markers.push({ c: c, layer: makeLayer(c, pts[i]) }); });
+  }).then(function (d) {
+    data = d;
+    stateNames = d.stateNames || {};
+    cfg = { recentDays: d.recentDays, coldDays: d.coldDays };
+    view = recall('td_view') === 'individuals' ? 'individuals' : 'companies';
+    var nCo = itemsFor('companies'), nPe = itemsFor('individuals');
+    document.getElementById('nCompanies').textContent = '(' + (nCo.mapped.length + nCo.unmapped.length).toLocaleString() + ')';
+    document.getElementById('nPeople').textContent = '(' + (nPe.mapped.length + nPe.unmapped.length).toLocaleString() + ')';
+
     renderLegend();
-    renderUnmapped(data.unmapped);
-    buildStateSelect(data);
-    refresh(true);
-    document.getElementById('synced').textContent = data.lastSync ? 'Last sync: ' + new Date(data.lastSync).toLocaleString() : 'No sync yet';
-    if (data.lastSyncFailed) showError('The most recent sync failed; data may be stale. Check the sync logs.');
-    else if (!data.mapped.length && !data.unmapped.length) showError('No contacts yet. Run "npm run sync" (or "npm run seed-demo").');
+    document.getElementById('stateSel').addEventListener('change', function () {
+      selected = this.value; store('td_state', selected); refresh(true);
+    });
+    [['viewCompanies', 'companies'], ['viewPeople', 'individuals']].forEach(function (b) {
+      document.getElementById(b[0]).addEventListener('click', function () {
+        if (view === b[1]) return;
+        view = b[1]; store('td_view', view);
+        render(selected, true);
+      });
+    });
+    render(recall('td_state'), true);
+
+    document.getElementById('synced').textContent = d.lastSync ? 'Last sync: ' + new Date(d.lastSync).toLocaleString() : 'No sync yet';
+    if (d.lastSyncFailed) showError('The most recent sync failed; data may be stale. Check the sync logs.');
+    else if (!d.mapped.length && !d.unmapped.length) showError('No contacts yet. Run "npm run sync" (or "npm run seed-demo").');
   }).catch(function (err) {
     if (err.message !== 'unauthorized') showError('Could not load contacts: ' + err.message);
   });

@@ -18,6 +18,11 @@ contact were.
 A company's dates combine its own deals and all of its people: its last purchase is the most recent closed-won deal on
 the company or any of its people, and its last contact is the most recent across the company and its people.
 
+A **Companies / Individuals** switch at the top of the sidebar changes what each dot represents. *Individuals* shows every
+person as their own dot (colored by their own purchase and contact history); people who belong to a company are placed at
+the company's location and fanned out slightly so each can be clicked. The state filter, status toggles and counts follow
+the chosen view, and the choice is remembered in the browser.
+
 The sidebar has the legend, per-status toggles and counts, a **State** filter, and an **Unmapped** panel for companies
 and contacts that could not be placed (with the reason).
 
