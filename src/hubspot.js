@@ -72,6 +72,21 @@ function createHubSpotClient({ token, fetchImpl, sleep } = {}) {
     return out;
   }
 
+  // Every deal, with contact/company association ids (used by scripts/diagnose-deals.js).
+  async function fetchAllDeals() {
+    const out = [];
+    let after;
+    do {
+      const q = new URLSearchParams({ limit: '100', properties: DEAL_PROPS.join(','), associations: 'contacts,companies', archived: 'false' });
+      if (after) q.set('after', after);
+      const page = await call('GET', `/crm/v3/objects/deals?${q}`);
+      out.push(...(page.results || []));
+      after = page.paging && page.paging.next && page.paging.next.after;
+    } while (after);
+    return out;
+  }
+  const fetchDealPipelines = async () => (await call('GET', '/crm/v3/pipelines/deals')).results || [];
+
   const fetchDeals = (ids) => batchRead('deals', ids, DEAL_PROPS);
   const fetchCompanies = (ids) => batchRead('companies', ids, COMPANY_PROPS);
 
@@ -81,7 +96,7 @@ function createHubSpotClient({ token, fetchImpl, sleep } = {}) {
     return closedWonStagesFromPipelines(res.results || []);
   }
 
-  return { fetchAllContacts, fetchDeals, fetchCompanies, fetchCompanyDealIds, fetchClosedWonStages };
+  return { fetchAllContacts, fetchDeals, fetchCompanies, fetchCompanyDealIds, fetchClosedWonStages, fetchAllDeals, fetchDealPipelines };
 }
 
 function closedWonStagesFromPipelines(pipelines) {

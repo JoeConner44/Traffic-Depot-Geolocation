@@ -59,3 +59,16 @@ test('company-level deals count toward the company purchase date', async () => {
   assert.equal(out.byContact.get('1'), '2025-01-01T00:00:00.000Z');
   assert.equal(out.byCompany.get('c1'), '2026-03-01T00:00:00.000Z');
 });
+
+test('fetchAllDeals follows pagination and requests associations', async () => {
+  const urls = [];
+  const queue = [
+    res(200, { results: [{ id: '1' }], paging: { next: { after: 'x' } } }),
+    res(200, { results: [{ id: '2' }] }),
+  ];
+  const client = createHubSpotClient({ token: 't', fetchImpl: async (u) => { urls.push(u); return queue.shift(); }, sleep: async () => {} });
+  const deals = await client.fetchAllDeals();
+  assert.deepEqual(deals.map((d) => d.id), ['1', '2']);
+  assert.match(urls[0], /associations=contacts%2Ccompanies/);
+  assert.match(urls[1], /after=x/);
+});
