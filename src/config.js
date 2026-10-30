@@ -9,6 +9,7 @@ const int = (v, d) => {
 
 const config = {
   recentDays: int(process.env.RECENT_DAYS, 90),
+  coldDays: int(process.env.COLD_DAYS, 365), // no purchase for this long -> ice cube
   includeEmailSendDate: bool(process.env.INCLUDE_EMAIL_SEND_DATE, false),
   purchaseProvider: (process.env.PURCHASE_PROVIDER || 'hubspot_deals').trim().toLowerCase(),
   allowNonGA: bool(process.env.ALLOW_NON_GA, false),

@@ -40,7 +40,22 @@ test('client follows pagination and retries on 429 honoring Retry-After', async 
   assert.match(calls[2], /after=abc/);
   assert.deepEqual(sleeps, [2000]);
 });
-test('shapeContact extracts association ids', () => {
-  const c = shapeContact({ id: 5, properties: { firstname: 'A' }, associations: { deals: { results: [{ id: '7' }] }, companies: { results: [{ id: '8' }] } } });
-  assert.deepEqual([c.id, c.dealIds, c.companyIds], ['5', ['7'], ['8']]);
+test('shapeContact extracts association ids and picks the primary company', () => {
+  const c = shapeContact({ id: 5, properties: { firstname: 'A' }, associations: {
+    deals: { results: [{ id: '7' }] },
+    companies: { results: [{ id: '8', type: 'contact_to_company_unlabeled' }, { id: '9', type: 'contact_to_company' }] },
+  } });
+  assert.deepEqual([c.id, c.dealIds, c.companyIds, c.primaryCompanyId], ['5', ['7'], ['8', '9'], '9']);
+  assert.equal(shapeContact({ id: 6, properties: {} }).primaryCompanyId, null);
+});
+test('company-level deals count toward the company purchase date', async () => {
+  const { createHubspotDealsProvider } = require('../src/providers/hubspotDeals');
+  const hubspot = {
+    fetchClosedWonStages: async () => new Set(['default:won']),
+    fetchCompanyDealIds: async () => new Map([['c1', ['d9']]]),
+    fetchDeals: async (ids) => ids.map((id) => ({ id, properties: { pipeline: 'default', dealstage: 'won', closedate: id === 'd9' ? '2026-03-01T00:00:00Z' : '2025-01-01T00:00:00Z' } })),
+  };
+  const out = await createHubspotDealsProvider({ hubspot }).getLastPurchases([{ id: '1', dealIds: ['d1'] }], ['c1']);
+  assert.equal(out.byContact.get('1'), '2025-01-01T00:00:00.000Z');
+  assert.equal(out.byCompany.get('c1'), '2026-03-01T00:00:00.000Z');
 });

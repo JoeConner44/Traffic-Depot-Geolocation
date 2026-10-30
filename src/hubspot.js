@@ -7,7 +7,7 @@ const CONTACT_PROPS = [
   'notes_last_contacted', 'hs_last_sales_activity_timestamp', 'hs_email_last_send_date',
 ];
 const DEAL_PROPS = ['closedate', 'dealstage', 'amount', 'pipeline'];
-const COMPANY_PROPS = ['name', 'address', 'city', 'state', 'zip'];
+const COMPANY_PROPS = ['name', 'address', 'city', 'state', 'zip', 'notes_last_contacted', 'hs_last_sales_activity_timestamp'];
 
 function createHubSpotClient({ token, fetchImpl, sleep } = {}) {
   if (!token) throw new Error('HUBSPOT_TOKEN is not set');
@@ -59,6 +59,19 @@ function createHubSpotClient({ token, fetchImpl, sleep } = {}) {
     return out;
   }
 
+  // Deals attached directly to companies (HubSpot often links a deal to the company, not to each person).
+  // Returns Map(companyId -> dealIds[]).
+  async function fetchCompanyDealIds(companyIds) {
+    const out = new Map();
+    const unique = [...new Set(companyIds)];
+    for (let i = 0; i < unique.length; i += 500) {
+      const chunk = unique.slice(i, i + 500);
+      const res = await call('POST', '/crm/v4/associations/companies/deals/batch/read', { inputs: chunk.map((id) => ({ id })) });
+      for (const r of res.results || []) out.set(String(r.from.id), (r.to || []).map((t) => String(t.toObjectId)));
+    }
+    return out;
+  }
+
   const fetchDeals = (ids) => batchRead('deals', ids, DEAL_PROPS);
   const fetchCompanies = (ids) => batchRead('companies', ids, COMPANY_PROPS);
 
@@ -68,7 +81,7 @@ function createHubSpotClient({ token, fetchImpl, sleep } = {}) {
     return closedWonStagesFromPipelines(res.results || []);
   }
 
-  return { fetchAllContacts, fetchDeals, fetchCompanies, fetchClosedWonStages };
+  return { fetchAllContacts, fetchDeals, fetchCompanies, fetchCompanyDealIds, fetchClosedWonStages };
 }
 
 function closedWonStagesFromPipelines(pipelines) {
@@ -89,6 +102,9 @@ function shapeContact(raw) {
   const p = raw.properties || {};
   const assoc = raw.associations || {};
   const ids = (key) => ((assoc[key] && assoc[key].results) || []).map((r) => String(r.id));
+  const companyLinks = (assoc.companies && assoc.companies.results) || [];
+  // The PRIMARY company is the one HubSpot labels 'contact_to_company'; others are 'contact_to_company_unlabeled'.
+  const primary = companyLinks.find((r) => r.type === 'contact_to_company') || companyLinks[0];
   return {
     id: String(raw.id),
     firstname: p.firstname || '',
@@ -103,6 +119,7 @@ function shapeContact(raw) {
     lastSalesActivity: p.hs_last_sales_activity_timestamp || null,
     emailLastSend: p.hs_email_last_send_date || null,
     companyIds: ids('companies'),
+    primaryCompanyId: primary ? String(primary.id) : null,
     dealIds: ids('deals'),
   };
 }

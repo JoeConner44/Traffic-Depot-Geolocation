@@ -29,6 +29,8 @@ function createShopifyProvider({ domain, token, fetchImpl, sleep = defaultSleep,
 
   return {
     name: 'shopify',
+    // Shopify orders belong to customers (matched by email), so there are no company-level purchases here;
+    // a company's last purchase is then the latest across its people.
     async getLastPurchases(contacts) {
       const out = new Map();
       const cache = new Map();
@@ -41,7 +43,7 @@ function createShopifyProvider({ domain, token, fetchImpl, sleep = defaultSleep,
         }
         out.set(c.id, cache.get(email));
       }
-      return out;
+      return { byContact: out, byCompany: new Map() };
     },
   };
 }

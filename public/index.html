@@ -34,6 +34,16 @@
   .unmapped li .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
   .unmapped li a { font-size: 12px; }
   #msg { padding: 10px 16px; color: #b91c1c; display: none; }
+  .legend .ice { width: 18px; height: 18px; flex: none; }
+  .ice-icon img { width: 30px; height: 30px; display: block; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+  .tip b { font-size: 13px; } .tip div { font-size: 12px; }
+  .people { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
+  .people h3 { margin: 0 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .people ul { list-style: none; margin: 0; padding: 0; max-height: 190px; overflow: auto; }
+  .people li { padding: 4px 0; border-bottom: 1px solid #f1f1f1; }
+  .people li .pn { font-weight: 600; } .people li .pm { color: var(--muted); font-size: 12px; }
+  .people .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  .pop .status { margin: 2px 0 4px; font-size: 12px; color: var(--muted); }
   .pop b { font-size: 15px; } .pop table { margin-top: 4px; border-collapse: collapse; }
   .pop td { padding: 1px 8px 1px 0; vertical-align: top; } .pop td:first-child { color: var(--muted); white-space: nowrap; }
   .pop .flag { margin-top: 6px; font-size: 12px; color: #92400e; background: #fef3c7; padding: 2px 6px; border-radius: 4px; display: inline-block; }
@@ -52,7 +62,7 @@
     <div class="statebox"><label for="stateSel">State</label><select id="stateSel"></select></div>
     <div class="legend" id="legend"></div>
     <div class="unmapped">
-      <h2>Unmapped contacts (<span id="uCount">0</span>)</h2>
+      <h2>Unmapped (<span id="uCount">0</span>)</h2>
       <ul id="uList"></ul>
     </div>
   </aside>
@@ -62,13 +72,15 @@
 <script src="/vendor/leaflet/leaflet.js"></script>
 <script>
 (function () {
-  var COLORS = { green: '#16a34a', yellow: '#eab308', red: '#dc2626' };
-  var visible = { green: true, yellow: true, red: true };
+  var COLORS = { green: '#16a34a', yellow: '#eab308', red: '#dc2626', grey: '#9ca3af' }; // ice uses the icon
+  var ORDER = ['green', 'yellow', 'red', 'ice', 'grey'];
+  var visible = { green: true, yellow: true, red: true, ice: true, grey: true };
   var markers = [];      // { c, layer }
   var unmappedLis = [];  // { c, li }
   var countEls = {};
   var selected = 'ALL';
   var stateNames = {};
+  var cfg = { recentDays: 90, coldDays: 365 };
 
   var map = L.map('map', { preferCanvas: true }).setView([32.75, -83.4], 7); // centre of Georgia
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -83,27 +95,74 @@
     (children || []).forEach(function (c) { e.appendChild(c); });
     return e;
   }
+  // Ice cube image: your PNG if present, otherwise the bundled SVG.
+  function iceImg(cls) {
+    var img = el('img', { src: '/assets/ice-cube.png', alt: 'Ice cube', 'class': cls || '' });
+    img.onerror = function () { img.onerror = null; img.src = '/assets/ice-cube.svg'; };
+    return img;
+  }
   function fmt(iso) {
     if (!iso) return '—';
     return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
   }
+  function ago(iso) {
+    if (!iso) return 'never';
+    var d = Math.floor((Date.now() - Date.parse(iso)) / 86400000);
+    if (d < 1) return 'today';
+    if (d < 14) return d + (d === 1 ? ' day ago' : ' days ago');
+    if (d < 60) return Math.round(d / 7) + ' weeks ago';
+    if (d < 730) return Math.round(d / 30.4) + ' months ago';
+    return (d / 365).toFixed(1) + ' years ago';
+  }
+  function when(iso) { return iso ? ago(iso) + ' (' + fmt(iso) + ')' : 'never'; }
+  function statusText(c) {
+    switch (c.status) {
+      case 'green': return 'Purchased in the last ' + cfg.recentDays + ' days';
+      case 'yellow': return 'Bought before; contacted in the last ' + cfg.recentDays + ' days';
+      case 'red': return 'Bought before; no contact in ' + cfg.recentDays + ' days';
+      case 'ice': return 'No purchase in ' + cfg.coldDays + '+ days';
+      default: return 'Never purchased';
+    }
+  }
   function linkTo(c) {
     return c.hubspotUrl ? el('a', { href: c.hubspotUrl, target: '_blank', rel: 'noopener', text: 'Open in HubSpot' }) : null;
+  }
+  function tooltip(c) {
+    var root = el('div', { 'class': 'tip' });
+    root.appendChild(el('b', { text: c.name }));
+    root.appendChild(el('div', { text: statusText(c) }));
+    root.appendChild(el('div', { text: 'Last purchase: ' + (c.lastPurchase ? ago(c.lastPurchase) : 'never') }));
+    root.appendChild(el('div', { text: 'Last contact: ' + (c.lastContacted ? ago(c.lastContacted) : 'never') }));
+    return root;
   }
   function popup(c) {
     var root = el('div', { 'class': 'pop' });
     root.appendChild(el('b', { text: c.name }));
-    var rows = [['Company', c.company || '—'], ['City', c.city ? c.city + (c.state ? ', ' + c.state : '') : '—'], ['Last purchase', fmt(c.lastPurchase)], ['Last contact', fmt(c.lastContacted)]];
+    if (c.kind === 'person' && c.company) root.appendChild(el('div', { text: c.company }));
+    root.appendChild(el('div', { 'class': 'status', text: statusText(c) }));
+    var rows = [['City', c.city ? c.city + (c.state ? ', ' + c.state : '') : '—'], ['Last purchase', when(c.lastPurchase)], ['Last contact', when(c.lastContacted)]];
     var tbody = el('tbody');
     rows.forEach(function (r) { tbody.appendChild(el('tr', {}, [el('td', { text: r[0] }), el('td', { text: r[1] })])); });
     root.appendChild(el('table', {}, [tbody]));
-    if (c.locationSource === 'company') root.appendChild(el('div', { 'class': 'flag', text: 'Location from company address' }));
+    if (c.kind === 'company' && c.locationSource === 'contact') root.appendChild(el('div', { 'class': 'flag', text: 'Location from a contact’s address' }));
     var a = linkTo(c);
     if (a) { var p = el('div'); p.style.marginTop = '6px'; p.appendChild(a); root.appendChild(p); }
+    if (c.kind === 'company' && c.people.length) {
+      var ul = el('ul');
+      c.people.forEach(function (p) {
+        var dot = el('span', { 'class': 'dot' });
+        if (p.status === 'ice') { dot.style.background = '#7dd3fc'; } else { dot.style.background = COLORS[p.status]; }
+        var meta = 'Purchase: ' + (p.lastPurchase ? ago(p.lastPurchase) : 'never') + ' · Contact: ' + (p.lastContacted ? ago(p.lastContacted) : 'never');
+        var li = el('li', {}, [el('div', { 'class': 'pn' }, [dot, document.createTextNode(p.name)]), el('div', { 'class': 'pm', text: meta })]);
+        if (p.hubspotUrl) { var l = el('a', { href: p.hubspotUrl, target: '_blank', rel: 'noopener', text: 'HubSpot' }); l.style.fontSize = '12px'; li.appendChild(l); }
+        ul.appendChild(li);
+      });
+      root.appendChild(el('div', { 'class': 'people' }, [el('h3', { text: 'People (' + c.people.length + ')' }), ul]));
+    }
     return root;
   }
 
-  // Contacts that share a geocoded point (same city/company) are fanned out slightly so each stays clickable.
+  // Places that share a geocoded point are fanned out slightly so each stays clickable.
   function jitter(list) {
     var seen = {};
     return list.map(function (c) {
@@ -114,14 +173,26 @@
     });
   }
 
+  function makeLayer(c, pt) {
+    var layer;
+    if (c.status === 'ice') {
+      var holder = el('div', { 'class': 'ice-icon' }, [iceImg()]);
+      layer = L.marker(pt, { icon: L.divIcon({ html: holder, className: '', iconSize: [30, 30], iconAnchor: [15, 15] }), riseOnHover: true });
+    } else {
+      layer = L.circleMarker(pt, { radius: c.kind === 'company' ? 8 : 6, color: '#fff', weight: 1.5, fillColor: COLORS[c.status], fillOpacity: 0.92 });
+    }
+    return layer.bindTooltip(function () { return tooltip(c); }, { direction: 'top', offset: [0, c.status === 'ice' ? -12 : -6] })
+      .bindPopup(function () { return popup(c); }, { maxWidth: 360, minWidth: 260 });
+  }
+
   // --- filtering ---
   function stateKey(c) { return c.state || '?'; }
   function inState(c) { return selected === 'ALL' || stateKey(c) === selected; }
-  // Unmapped contacts with no known state stay visible under any state filter, so none are hidden silently.
+  // Unmapped places with no known state stay visible under any state filter, so none are hidden silently.
   function unmappedInState(c) { return selected === 'ALL' || !c.state || c.state === selected; }
 
   function refresh(refit) {
-    var counts = { green: 0, yellow: 0, red: 0 };
+    var counts = { green: 0, yellow: 0, red: 0, ice: 0, grey: 0 };
     var pts = [];
     markers.forEach(function (m) {
       var stateOk = inState(m.c);
@@ -148,7 +219,7 @@
       if (a === 'GA') return -1; if (b === 'GA') return 1;
       return (stateNames[a] || a).localeCompare(stateNames[b] || b);
     });
-    function opt(value, label) { var o = el('option', { value: value, text: label }); sel.appendChild(o); }
+    function opt(value, label) { sel.appendChild(el('option', { value: value, text: label })); }
     opt('ALL', 'All states (' + total.toLocaleString() + ')');
     codes.forEach(function (k) { opt(k, (stateNames[k] || k) + ' (' + byState[k].toLocaleString() + ')'); });
     if (byState['?']) opt('?', 'Unknown state (' + byState['?'].toLocaleString() + ')');
@@ -165,24 +236,28 @@
     });
   }
 
-  function renderLegend(data) {
+  function renderLegend() {
     var box = document.getElementById('legend');
     box.textContent = '';
-    var d = data.recentDays;
-    var defs = [
-      ['green', 'Purchased in the last ' + d + ' days'],
-      ['yellow', 'Contacted in the last ' + d + ' days, no recent purchase'],
-      ['red', 'No recent purchase or contact']
-    ];
-    defs.forEach(function (def) {
+    var r = cfg.recentDays, c = cfg.coldDays;
+    var desc = {
+      green: 'Purchased in the last ' + r + ' days',
+      yellow: 'Bought ' + r + '–' + c + ' days ago; contacted in the last ' + r + ' days',
+      red: 'Bought ' + r + '–' + c + ' days ago; no contact in ' + r + ' days',
+      ice: 'No purchase in ' + c + '+ days',
+      grey: 'Never purchased'
+    };
+    var names = { green: 'Green', yellow: 'Yellow', red: 'Red', ice: 'Ice cube', grey: 'Grey' };
+    ORDER.forEach(function (k) {
       var cb = el('input', { type: 'checkbox' });
-      cb.checked = visible[def[0]];
-      cb.addEventListener('change', function () { visible[def[0]] = cb.checked; refresh(false); });
-      var dot = el('span', { 'class': 'dot' }); dot.style.background = COLORS[def[0]];
-      var txt = el('span', {}, [el('span', { text: def[0][0].toUpperCase() + def[0].slice(1) }), el('div', { 'class': 'desc', text: def[1] })]);
+      cb.checked = visible[k];
+      cb.addEventListener('change', function () { visible[k] = cb.checked; refresh(false); });
+      var mark;
+      if (k === 'ice') mark = iceImg('ice'); else { mark = el('span', { 'class': 'dot' }); mark.style.background = COLORS[k]; }
+      var txt = el('span', {}, [el('span', { text: names[k] }), el('div', { 'class': 'desc', text: desc[k] })]);
       var count = el('span', { 'class': 'count', text: '0' });
-      countEls[def[0]] = count;
-      box.appendChild(el('label', {}, [cb, dot, txt, count]));
+      countEls[k] = count;
+      box.appendChild(el('label', {}, [cb, mark, txt, count]));
     });
   }
 
@@ -190,10 +265,13 @@
     var ul = document.getElementById('uList');
     ul.textContent = '';
     list.forEach(function (c) {
-      var dot = el('span', { 'class': 'dot' }); dot.style.background = COLORS[c.status];
+      var mark;
+      if (c.status === 'ice') { mark = el('span', { 'class': 'dot' }); mark.style.background = '#7dd3fc'; }
+      else { mark = el('span', { 'class': 'dot' }); mark.style.background = COLORS[c.status]; }
+      var sub = c.kind === 'company' ? (c.people.length + (c.people.length === 1 ? ' person' : ' people')) : (c.company || 'Individual');
       var li = el('li', {}, [
-        el('div', { 'class': 'n' }, [dot, document.createTextNode(c.name)]),
-        el('div', { text: c.company || '—' }),
+        el('div', { 'class': 'n' }, [mark, document.createTextNode(c.name)]),
+        el('div', { text: sub }),
         el('div', { 'class': 'why', text: c.reason || 'No location' })
       ]);
       var a = linkTo(c); if (a) li.appendChild(a);
@@ -212,13 +290,10 @@
     return r.json();
   }).then(function (data) {
     stateNames = data.stateNames || {};
+    cfg = { recentDays: data.recentDays, coldDays: data.coldDays };
     var pts = jitter(data.mapped);
-    data.mapped.forEach(function (c, i) {
-      var layer = L.circleMarker(pts[i], { radius: 7, color: '#fff', weight: 1.5, fillColor: COLORS[c.status], fillOpacity: 0.9 })
-        .bindPopup(function () { return popup(c); });
-      markers.push({ c: c, layer: layer });
-    });
-    renderLegend(data);
+    data.mapped.forEach(function (c, i) { markers.push({ c: c, layer: makeLayer(c, pts[i]) }); });
+    renderLegend();
     renderUnmapped(data.unmapped);
     buildStateSelect(data);
     refresh(true);

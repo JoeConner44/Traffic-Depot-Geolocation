@@ -4,21 +4,34 @@ const { openDb } = require('../src/db');
 const { runSync } = require('../src/sync');
 const { createGeocoder } = require('../src/geocode');
 const { createHubspotDealsProvider } = require('../src/providers/hubspotDeals');
+const { shapeContact } = require('../src/hubspot');
 
+const link = (id) => ({ id, type: 'contact_to_company' });
 const contact = (id, props, assoc = {}) => ({ id, properties: props, associations: assoc });
+const inCompany = (cid, extra = {}) => ({ companies: { results: [link(cid)] }, ...extra });
 
-function fakeHubspot(extra) {
+const BASE = [
+  contact('1', { firstname: 'Ann', lastname: 'A', address: '1 Main St', city: 'Atlanta', state: 'GA', zip: '30303', notes_last_contacted: '2020-01-01T00:00:00Z' }, { deals: { results: [{ id: 'd1' }] } }),
+  contact('2', { firstname: 'Bob', lastname: 'B', company: 'Acme', state: '' }, inCompany('c1')),
+  contact('3', { firstname: 'Cy', lastname: 'C', city: 'Miami', state: 'FL' }),
+  contact('4', { firstname: 'Di', lastname: 'D' }),
+  contact('5', { firstname: 'Ed', lastname: 'E', address: 'nowhere', city: 'Zzz', state: 'GA' }),
+  contact('6', { firstname: 'Eve', lastname: 'E' }, inCompany('c2')),
+  contact('7', { firstname: 'Flo', lastname: 'F', notes_last_contacted: '2026-05-01T00:00:00Z' }, inCompany('c1')),
+];
+const COMPANIES = {
+  c1: { name: 'Acme', address: '9 Plant Rd', city: 'Rome', state: 'GA', zip: '30161' },
+  c2: { name: 'Ghost Co' },
+  c3: { name: 'Beach Co', address: '5 Ocean Dr', city: 'Miami', state: 'FL', zip: '33101' },
+  c4: { name: 'No Address Co' },
+};
+
+function fakeHubspot(extra = [], companyDeals = { c1: ['d2'] }) {
   return {
-    fetchAllContacts: async () => [
-      contact('1', { firstname: 'Ann', lastname: 'A', address: '1 Main St', city: 'Atlanta', state: 'GA', zip: '30303', notes_last_contacted: '2020-01-01T00:00:00Z' }, { deals: { results: [{ id: 'd1' }] } }),
-      contact('2', { firstname: 'Bob', lastname: 'B', company: 'Acme', state: '' }, { companies: { results: [{ id: 'c1' }] } }),
-      contact('3', { firstname: 'Cy', lastname: 'C', city: 'Miami', state: 'FL' }),
-      contact('4', { firstname: 'Di', lastname: 'D' }),
-      contact('5', { firstname: 'Ed', lastname: 'E', address: 'nowhere', city: 'Zzz', state: 'GA' }),
-      ...(extra || []),
-    ],
-    fetchCompanies: async () => [{ id: 'c1', properties: { name: 'Acme', address: '9 Plant Rd', city: 'Rome', state: 'GA', zip: '30161' } }],
-    fetchDeals: async () => [{ id: 'd1', properties: { pipeline: 'default', dealstage: 'won', closedate: '2025-05-01T00:00:00Z' } }],
+    fetchAllContacts: async () => [...BASE, ...extra],
+    fetchCompanies: async (ids) => ids.filter((id) => COMPANIES[id]).map((id) => ({ id, properties: COMPANIES[id] })),
+    fetchCompanyDealIds: async (ids) => new Map(ids.map((id) => [id, companyDeals[id] || []])),
+    fetchDeals: async (ids) => ids.map((id) => ({ id, properties: { pipeline: 'default', dealstage: 'won', closedate: id === 'd2' ? '2026-02-01T00:00:00Z' : '2025-05-01T00:00:00Z' } })),
     fetchClosedWonStages: async () => new Set(['default:won']),
   };
 }
@@ -49,73 +62,109 @@ function fakeGoogle() {
 
 const cfg = { allowNonGA: false, includeEmailSendDate: false };
 
-async function run(db, google, { config = cfg, extra } = {}) {
-  const hubspot = fakeHubspot(extra);
+async function run(db, google, { config = cfg, extra, companyDeals } = {}) {
+  const hubspot = fakeHubspot(extra, companyDeals);
   const geocoder = createGeocoder({ db, apiKey: 'k', fetchImpl: google.fetchImpl, sleep: async () => {}, throttleMs: 0 });
   return runSync({ db, config, hubspot, provider: createHubspotDealsProvider({ hubspot }), geocoder, log: () => {} });
 }
+const contactRow = (db, id) => db.prepare('SELECT * FROM contacts WHERE id=?').get(id);
+const companyRow = (db, id) => db.prepare('SELECT * FROM companies WHERE id=?').get(id);
 
-test('sync maps, falls back to company address, reports unmapped, skips non-GA', async () => {
+test('people are grouped under their company, which is placed and aggregated; individuals map themselves', async () => {
   const db = openDb(':memory:');
-  const summary = await run(db, fakeGoogle());
-  assert.equal(summary.fetched, 5);
-  assert.equal(summary.skippedNonGA, 1);
-  assert.equal(summary.stored, 4);
-  assert.equal(summary.mapped, 2);
-  assert.equal(summary.unmapped, 2);
-  assert.equal(summary.addressFromCompany, 1);
-  const row = (id) => db.prepare('SELECT * FROM contacts WHERE id=?').get(id);
-  assert.equal(row('1').last_purchase, '2025-05-01T00:00:00.000Z');
-  assert.equal(row('2').location_source, 'company');
-  assert.equal(row('2').city, 'Rome');
-  assert.match(row('4').unmapped_reason, /No address/);
-  assert.match(row('5').unmapped_reason, /could not be geocoded/);
-  assert.equal(row('3'), undefined);
+  const s = await run(db, fakeGoogle());
+  assert.equal(s.fetched, 7);
+  assert.equal(s.skippedNonGA, 1);                       // Cy (FL)
+  assert.equal(s.companies, 2);
+  assert.equal(s.companiesMapped, 1);                    // Acme
+  assert.equal(s.companiesUnmapped, 1);                  // Ghost Co has no address anywhere
+  assert.equal(s.individuals, 3);                        // Ann, Di, Ed
+  assert.equal(s.individualsMapped, 1);
+  assert.equal(s.people, 3);                             // Bob, Flo, Eve
+
+  const acme = companyRow(db, 'c1');
+  assert.equal(acme.name, 'Acme');
+  assert.equal(acme.city, 'Rome');
+  assert.equal(acme.lat, 34.25);
+  assert.equal(acme.location_source, 'company');
+  assert.equal(acme.last_purchase, '2026-02-01T00:00:00.000Z');   // from the deal attached to the company itself
+  assert.equal(acme.last_contacted, '2026-05-01T00:00:00.000Z');  // latest across its people
+  assert.match(companyRow(db, 'c2').unmapped_reason, /No address/);
+
+  assert.equal(contactRow(db, '2').company_id, 'c1');
+  assert.equal(contactRow(db, '2').lat, null);            // shown inside the company, not on its own
+  assert.equal(contactRow(db, '2').unmapped_reason, null);
+  assert.equal(contactRow(db, '1').company_id, null);
+  assert.equal(contactRow(db, '1').last_purchase, '2025-05-01T00:00:00.000Z');
+  assert.match(contactRow(db, '4').unmapped_reason, /No address/);
+  assert.match(contactRow(db, '5').unmapped_reason, /could not be geocoded/);
+  assert.equal(contactRow(db, '3'), undefined);
 });
 
 test('sync is idempotent and geocodes each address only once', async () => {
   const db = openDb(':memory:');
   const google = fakeGoogle();
   await run(db, google);
-  const firstCalls = google.calls.length;
-  assert.equal(firstCalls, 3);
+  const first = google.calls.length;
+  assert.equal(first, 3);                                  // Atlanta, Rome, "nowhere" (not found)
   const again = await run(db, google);
-  assert.equal(google.calls.length, firstCalls); // all served from geocode_cache (incl. the not-found one)
+  assert.equal(google.calls.length, first);
   assert.equal(again.geocodeApiCalls, 0);
-  assert.equal(db.prepare('SELECT COUNT(*) n FROM contacts').get().n, 4);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM contacts').get().n, 6);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM companies').get().n, 2);
+});
+
+test('a company with no address of its own is placed at a person\'s address and flagged', async () => {
+  const db = openDb(':memory:');
+  const extra = [contact('8', { firstname: 'Gil', lastname: 'G', address: '3 Mill Rd', city: 'Rome', state: 'GA' }, inCompany('c4'))];
+  await run(db, fakeGoogle(), { extra });
+  const co = companyRow(db, 'c4');
+  assert.equal(co.location_source, 'contact');
+  assert.equal(co.lat, 34.25);
+});
+
+test('a company whose address is outside Georgia is skipped together with its people', async () => {
+  const db = openDb(':memory:');
+  const extra = [contact('9', { firstname: 'Hal', lastname: 'H' }, inCompany('c3'))];
+  const s = await run(db, fakeGoogle(), { extra });
+  assert.equal(companyRow(db, 'c3'), undefined);
+  assert.equal(contactRow(db, '9'), undefined);
+  assert.equal(s.skippedNonGA, 2);
 });
 
 test('with ALLOW_NON_GA, a GA-labelled contact that geocodes to another state is unmapped; a FL contact stays mapped', async () => {
   const db = openDb(':memory:');
   const extra = [
-    contact('6', { firstname: 'Fay', lastname: 'F', address: '1 Bay St', city: 'Miami', state: 'GA', zip: '33101' }),
-    contact('7', { firstname: 'Gus', lastname: 'G', address: '2 Bay St', city: 'Miami', state: 'FL', zip: '33101' }),
+    contact('10', { firstname: 'Fay', lastname: 'F', address: '1 Bay St', city: 'Miami', state: 'GA', zip: '33101' }),
+    contact('11', { firstname: 'Gus', lastname: 'G', address: '2 Bay St', city: 'Miami', state: 'FL', zip: '33101' }),
   ];
   await run(db, fakeGoogle(), { config: { ...cfg, allowNonGA: true }, extra });
-  const row = (id) => db.prepare('SELECT * FROM contacts WHERE id=?').get(id);
-  assert.equal(row('6').lat, null);
-  assert.match(row('6').unmapped_reason, /says GA but geocoded to FL/);
-  assert.equal(row('7').lat, 25.76);
+  assert.equal(contactRow(db, '10').lat, null);
+  assert.match(contactRow(db, '10').unmapped_reason, /says GA but geocoded to FL/);
+  assert.equal(contactRow(db, '11').lat, 25.76);
 });
 
 test('Georgia contacts are geocoded with a GA restriction, so Auburn, GA does not land in Auburn, AL', async () => {
   const db = openDb(':memory:');
   const google = fakeGoogle();
-  const extra = [contact('8', { firstname: 'Hal', lastname: 'H', city: 'Auburn', state: 'GA' })];
+  const extra = [contact('12', { firstname: 'Hal', lastname: 'H', city: 'Auburn', state: 'GA' })];
   await run(db, google, { extra });
-  assert.ok(google.calls.some((u) => /auburn/.test(u) && /administrative_area%3AGA|administrative_area:GA/.test(decodeURIComponent(u))));
-  const r = db.prepare('SELECT * FROM contacts WHERE id=?').get('8');
-  assert.equal(r.lat, 33.75); // Georgia, not Alabama's 32.6
+  assert.ok(google.calls.some((u) => /auburn/.test(u) && /administrative_area:GA/.test(decodeURIComponent(u))));
+  assert.equal(contactRow(db, '12').lat, 33.75);           // Georgia, not Alabama's 32.6
 });
 
 test('legacy cache rows (no geo_state) are looked up again once, then served from cache', async () => {
   const db = openDb(':memory:');
   db.prepare("INSERT INTO geocode_cache (address_key, lat, lng, status, created_at) VALUES ('auburn, ga', 32.6, -85.48, 'ok', ?)").run(new Date().toISOString());
   const google = fakeGoogle();
-  const extra = [contact('8', { firstname: 'Hal', lastname: 'H', city: 'Auburn', state: 'GA' })];
+  const extra = [contact('12', { firstname: 'Hal', lastname: 'H', city: 'Auburn', state: 'GA' })];
   await run(db, google, { extra });
-  assert.equal(db.prepare('SELECT lat FROM contacts WHERE id=?').get('8').lat, 33.75);
+  assert.equal(contactRow(db, '12').lat, 33.75);
   const before = google.calls.length;
   await run(db, google, { extra });
   assert.equal(google.calls.length, before);
+});
+
+test('shapeContact still works on the shapes the sync relies on', () => {
+  assert.equal(shapeContact(BASE[1]).primaryCompanyId, 'c1');
 });

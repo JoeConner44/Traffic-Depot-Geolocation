@@ -2,14 +2,29 @@
 
 Shows Traffic Depot's HubSpot contacts as color-coded dots on a map of Georgia.
 
-| Color | Meaning |
-|-------|---------|
-| 🟢 Green | Last purchase within `RECENT_DAYS` (default 90) |
-| 🟡 Yellow | No recent purchase, but last contacted within `RECENT_DAYS` |
-| 🔴 Red | Neither |
+The map shows **one dot per company** (contacts with no company in HubSpot appear as individual dots). Click a company
+for its name, city, status, last purchase and last contact, plus the **people** in it, each with their own purchase and
+contact history and a HubSpot link. Hover any dot for a quick summary, including how long ago the last purchase and
+contact were.
 
-Click a dot for name, company, city, last purchase, last contact and a HubSpot link. The sidebar has the legend, per-color
-toggles and counts, and an **Unmapped contacts** panel for contacts that could not be placed (with the reason).
+| Marker | Meaning |
+|--------|---------|
+| 🟢 Green | Last purchase within `RECENT_DAYS` (default 90) |
+| 🟡 Yellow | Bought before (`RECENT_DAYS` to `COLD_DAYS` ago) and contacted within `RECENT_DAYS` |
+| 🔴 Red | Bought before (`RECENT_DAYS` to `COLD_DAYS` ago) and **not** contacted within `RECENT_DAYS` |
+| 🧊 Ice cube | Last purchase `COLD_DAYS` (default 365) or more ago. Replaces the dot. |
+| ⚪ Grey | Never purchased (no closed-won deal), however recently they were contacted |
+
+A company's dates combine its own deals and all of its people: its last purchase is the most recent closed-won deal on
+the company or any of its people, and its last contact is the most recent across the company and its people.
+
+The sidebar has the legend, per-status toggles and counts, a **State** filter, and an **Unmapped** panel for companies
+and contacts that could not be placed (with the reason).
+
+### Changing the ice cube icon
+The page uses `public/assets/ice-cube.png` if it exists, otherwise the bundled placeholder `public/assets/ice-cube.svg`.
+To use your own icon, add a transparent square PNG (64x64 px or larger) named `ice-cube.png` to `public/assets/`,
+commit it, and redeploy.
 
 **Architecture:** Node.js + Express + SQLite (`better-sqlite3`). `npm run sync` pulls from HubSpot, geocodes new addresses,
 and writes SQLite. The web app serves a single Leaflet/OpenStreetMap page (no build step) from `/api/contacts`, behind a
@@ -40,6 +55,7 @@ Copy `.env.example` to `.env`. **Never commit `.env`** (it is in `.gitignore`).
 | `HUBSPOT_PORTAL_ID` | for links | – | Builds the "Open in HubSpot" links (the number in your HubSpot URL) |
 | `GOOGLE_MAPS_API_KEY` | sync | – | Google Geocoding API key |
 | `RECENT_DAYS` | no | `90` | Window for "recent" |
+| `COLD_DAYS` | no | `365` | A last purchase this many days ago or more gets the ice cube |
 | `INCLUDE_EMAIL_SEND_DATE` | no | `false` | Also count `hs_email_last_send_date` as a contact |
 | `PURCHASE_PROVIDER` | no | `hubspot_deals` | `hubspot_deals` or `shopify` |
 | `SHOPIFY_STORE_DOMAIN`, `SHOPIFY_ADMIN_TOKEN` | shopify only | – | Shopify Admin API access |
@@ -71,8 +87,10 @@ No write scopes are requested, and the app never writes to HubSpot.
 - **Last purchase** (`hubspot_deals`) = latest `closedate` among associated deals whose stage is closed-won. Closed-won is read
   from the pipeline stage metadata (`isClosed=true`, `probability=1.0`), so custom pipelines and stage names work.
   Deal properties requested: `closedate, dealstage, amount, pipeline`.
-- **Company fallback:** if a contact has no address, city or ZIP, the first associated company with one is used and the
-  popup shows "Location from company address".
+- **Companies:** each contact belongs to its **primary** associated company. A company is placed at its own address, or
+  at the address of one of its people if the company has none (the popup says so). People inside a company are not
+  geocoded separately. Contacts with no company are geocoded on their own address.
+- **Company purchases:** deals attached directly to the company count as well as deals attached to its people.
 
 ### Shopify purchase provider (optional)
 
@@ -159,6 +177,6 @@ Restart=always
 npm test
 ```
 
-Covers status calculation (boundaries, config, bad dates), last-contacted merging, closed-won detection, address
+Covers status calculation (grey, green, yellow, red and ice cube, boundaries, config, bad dates), last-contacted merging, closed-won detection, address
 normalization and the state filter, company fallback, pagination and 429 retry, and an end-to-end sync with fake HubSpot and
 Google responses (idempotency, geocode caching, unmapped handling).

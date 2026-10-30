@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Placeholder ice cube. To use your own icon, add public/assets/ice-cube.png (transparent, square, 64x64 or larger);
+       the page uses the PNG when it exists and falls back to this file. -->
+  <polygon points="32,6 56,19 56,45 32,58 8,45 8,19" fill="#bfe6f7" stroke="#2b7ea6" stroke-width="3" stroke-linejoin="round"/>
+  <polygon points="32,6 56,19 32,32 8,19" fill="#e9f8ff" stroke="#2b7ea6" stroke-width="3" stroke-linejoin="round"/>
+  <polyline points="32,32 32,58" fill="none" stroke="#2b7ea6" stroke-width="3"/>
+  <polyline points="16,24 22,27" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+</svg>
